@@ -103,7 +103,9 @@ class PanasonicHC:
                 self.device,
                 name=self.device.name or self.device.address
             )
+            await asyncio.sleep(0.5)
             await self._conn.start_notify(BLE_CHAR_NOTIFY, self.on_notification)
+            await asyncio.sleep(0.5)
             await self.async_get_status()
         except (BleakError, TimeoutError) as e:
             raise PanasonicHCException("Could not connect to Thermostat") from e
