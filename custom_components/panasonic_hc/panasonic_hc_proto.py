@@ -114,7 +114,7 @@ class PanasonicBLEParcel:
             self.mode = MODE((self.pdata[0] >> 5) & 7)
             self.temp = (self.pdata[4] - 70) / 2
             self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
-            self.powersave = self.pdata[-6]
+            self.powersave = self.pdata[8]
 
             if len(self.pdata) >= 6:
                 self.curtemp = (self.pdata[5] - 70) / 2
