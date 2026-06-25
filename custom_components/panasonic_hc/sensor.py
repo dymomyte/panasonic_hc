@@ -18,6 +18,7 @@ from .const import (
     SIGNAL_THERMOSTAT_CONNECTED,
     SIGNAL_THERMOSTAT_DISCONNECTED,
 )
+from .fault_codes import describe as describe_fault
 from .panasonic_hc import PanasonicHC
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ async def async_setup_entry(
             PanasonicHCEnergy(thermostat),
             PanasonicHCOutdoorTemp(thermostat),
             PanasonicHCFault(thermostat),
+            PanasonicHCFaultDescription(thermostat),
         ],
     )
 
@@ -209,4 +211,23 @@ class PanasonicHCFault(_PanasonicHCSensorBase):
     def _async_on_updated(self) -> None:
         if self._thermostat.error_code is not None:
             self._attr_native_value = self._thermostat.error_code
+            self.async_write_ha_state()
+
+
+class PanasonicHCFaultDescription(_PanasonicHCSensorBase):
+    """Human-readable description of the most-recent fault code (field 0x27)."""
+
+    _attr_name = "Fault Description"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:alert-circle-outline"
+
+    def __init__(self, thermostat: PanasonicHC) -> None:
+        """Initialize the fault-description sensor."""
+
+        super().__init__(thermostat, "fault_description")
+
+    @callback
+    def _async_on_updated(self) -> None:
+        if self._thermostat.error_code is not None:
+            self._attr_native_value = describe_fault(self._thermostat.error_code)
             self.async_write_ha_state()

@@ -1,0 +1,140 @@
+"""Panasonic ECOi / ECO-G / PACi alarm-code descriptions.
+
+The unit reports faults as a 2-character alarm code (a letter category + a 2-digit number),
+decoded from BLE field 0x27. This maps those codes to a short human description.
+
+Source: Panasonic "Fault Code Guide - ECOi / ECO-G / PACi". Meanings can vary slightly by
+model series, so treat these as guidance and confirm against the unit's service manual.
+"A00" is the integration's no-fault sentinel. "A.." codes are gas-engine (GHP) only and
+"C.." codes relate to central-controller/BMS networking.
+"""
+
+FAULT_CODES: dict[str, str] = {
+    "A00": "No fault",
+    # E - addressing & communication
+    "E01": "Remote can't see indoor unit / address not set (check wiring, re-address)",
+    "E02": "Remote: comms error from indoor unit",
+    "E03": "Indoor unit: comms error from remote",
+    "E04": "Indoor sees fewer outdoor/indoor units than set (check units powered, reset)",
+    "E05": "Indoor->outdoor comms: error sending signal",
+    "E06": "Outdoor->indoor comms: error receiving signal",
+    "E07": "Outdoor->indoor comms: error sending signal",
+    "E08": "Indoor address duplicated",
+    "E09": "Remote address duplicated / wireless controller not disabled",
+    "E10": "Indoor 'option' plug: error sending comms",
+    "E11": "Indoor 'option' plug: error receiving comms",
+    "E12": "Auto-addressing failed (CN100 shorted during auto-address)",
+    "E13": "Indoor unit failed to send signal to remote controller",
+    "E14": "Setting failure: duplicate master indoor units",
+    "E15": "Auto-addressing failed: fewer indoor units connected than set",
+    "E16": "Auto-addressing failed: more indoor units connected than set",
+    "E17": "Group-control wiring: main indoor not sending signal for subs",
+    "E18": "Group-control wiring: main indoor not receiving signal for subs",
+    "E20": "Auto-addressing failed: no indoor units connected",
+    "E24": "Auto-addressing failed: error on sub outdoor unit",
+    "E25": "Auto-addressing failed: outdoor address setting error",
+    "E26": "Auto-addressing failed: main/sub outdoor count mismatch",
+    "E29": "Sub outdoor unit not receiving comms from main outdoor",
+    "E31": "Comms failure with MDC (replace PCB / power PCB if persists)",
+    # F - sensors (thermistors)
+    "F01": "Indoor heat-exch inlet temp sensor (E1) failure",
+    "F02": "Indoor heat-exch freeze temp sensor (E2) failure",
+    "F03": "Indoor heat-exch outlet temp sensor (E3) failure",
+    "F04": "Outdoor discharge temp sensor (TD/DISCH1) failure",
+    "F05": "Outdoor discharge temp sensor (DISCH2) failure",
+    "F06": "Outdoor heat-exch temp sensor (C1/EXG1) failure",
+    "F07": "Outdoor heat-exch temp sensor (C2/EXL1) failure",
+    "F08": "Outdoor air temp sensor (TO) failure",
+    "F10": "Indoor inlet temp sensor failure",
+    "F11": "Indoor outlet temp sensor failure",
+    "F12": "Outdoor intake sensor (TS) failure",
+    "F16": "Outdoor high-pressure sensor failure",
+    "F23": "Outdoor heat-exch temp sensor (EXG2) failure",
+    "F24": "Outdoor heat-exch temp sensor (EXL2) failure",
+    "F29": "Indoor EEPROM error",
+    "F30": "Clock function (RTC) fault",
+    "F31": "Outdoor EEPROM error",
+    # H - compressor
+    "H01": "Compressor over-current (Comp1)",
+    "H02": "Compressor locked-rotor current detected (Comp1)",
+    "H03": "Compressor no current detected (Comp1)",
+    "H05": "Compressor discharge temp not detected (Comp1)",
+    "H06": "Low-pressure trip",
+    "H07": "Compressor low oil level",
+    "H08": "Compressor oil sensor fault (Comp1)",
+    "H11": "Compressor over-current (Comp2)",
+    "H12": "Compressor locked-rotor current detected (Comp2)",
+    "H13": "Compressor no current detected (Comp2)",
+    "H15": "Compressor discharge temp not detected (Comp2)",
+    "H27": "Compressor oil sensor fault (Comp2)",
+    "H28": "Compressor oil sensor connection failure",
+    "H31": "IPM (inverter module) trip",
+    # L - install / settings
+    "L01": "Indoor unit group setting error",
+    "L02": "Indoor/outdoor unit type/model mismatch",
+    "L03": "Duplicate main indoor address in group control",
+    "L04": "Duplicate outdoor system address",
+    "L05": "Two+ controllers set as 'priority' (shown on priority controller)",
+    "L06": "Two+ controllers set as 'priority' (shown on non-priority controller)",
+    "L07": "Group wiring connected to an individual indoor unit",
+    "L08": "Indoor address / group not set",
+    "L09": "Indoor unit capacity code not set",
+    "L10": "Outdoor unit capacity code not set",
+    "L11": "Group-control wiring incorrect",
+    "L13": "Indoor unit type/capacity setting error",
+    "L15": "Indoor unit pairing fault",
+    "L16": "Water heat-exch unit setting failure",
+    "L17": "Mismatch of outdoor units with different refrigerant",
+    "L18": "4-way valve failure",
+    "L19": "Water heat-exch unit duplicate address",
+    "L21": "Gas type setup failure",
+    # P - protection / unit faults
+    "P01": "Indoor fan-motor thermal overload",
+    "P02": "Compressor motor thermal overload / over- or under-voltage",
+    "P03": "Compressor discharge temp too high (Comp1, >111C) - low gas/EEV/pipework",
+    "P04": "High-pressure trip",
+    "P05": "Open phase on power supply (check phases, inverter/control PCB)",
+    "P09": "Ceiling panel incorrectly wired",
+    "P10": "Condensate float switch opened (drain)",
+    "P12": "Indoor DC fan-motor fault",
+    "P14": "Input from leak detector (if fitted)",
+    "P15": "Refrigerant loss (high discharge temp, EEV wide open, low current)",
+    "P16": "Open phase on compressor power supply",
+    "P17": "Compressor discharge temp too high (Comp2, >111C) - low gas/EEV/pipework",
+    "P18": "By-pass valve failure",
+    "P19": "4-way valve failure (no heat/cool changeover)",
+    "P20": "Refrigerant high temp/pressure (heat-exch C2 55-60C, cooling overload)",
+    "P22": "Outdoor fan-motor fault (jammed blade / connections / PCB)",
+    "P26": "Compressor over-current / inverter failure",
+    "P29": "Inverter motor-current detection circuit (MDC) fault",
+    "P30": "System controller detected fault on sub indoor unit",
+    "P31": "Simultaneous-operation multi control / group controller fault",
+    # C - central controller / BMS networking
+    "C01": "Duplicate central-control address",
+    "C02": "Central-control unit count mismatch",
+    "C03": "Incorrect central-control wiring",
+    "C04": "Incorrect central-control connection",
+    "C05": "System controller: error transmitting comms (wiring fault)",
+    "C06": "System controller: error receiving comms (wiring / CN1)",
+    "C12": "Batch alarm by local controller",
+    "C16": "Adaptor->unit transmission error",
+    "C17": "Adaptor<-unit reception error",
+    "C18": "Duplicate central address in adaptor",
+    "C19": "Duplicate adaptor address",
+    "C20": "Mix of PAC & GHP units on adaptor",
+    "C21": "Adaptor memory fault",
+    "C22": "Incorrect adaptor address setting",
+    "C31": "Configuration change detected by adaptor",
+    # A - gas-engine (GHP) only; listed for completeness
+    "A06": "GHP: engine start-up failure",
+    "A08": "GHP: engine stalled",
+    "A20": "GHP: cooling water temp high",
+}
+
+
+def describe(code: str | None) -> str | None:
+    """Return a human description for an alarm code, or the raw code if unmapped."""
+
+    if not code:
+        return None
+    return FAULT_CODES.get(code, f"Unknown fault ({code})")
