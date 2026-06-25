@@ -36,6 +36,25 @@ CONSUMPTION_INTERVAL = 300
 _LOGGER = logging.getLogger(__name__)
 
 
+def _descramble(data: bytes) -> bytes:
+    """Reverse the link-layer XOR obfuscation to recover the plaintext frame.
+
+    Mirrors the device scrambling (see PROTOCOL.md in the phc-rev-eng project): XOR every
+    byte with 0x69, undo the cumulative byte chain, then XOR byte[0] with 0xCA. Used only
+    for debug logging of raw frames; unlike PanasonicBLEParcel.parse it does no checksum or
+    length validation, so it works on any frame including ones the parser would reject.
+    """
+
+    v = bytearray(data)
+    for i in range(len(v)):
+        v[i] ^= 0x69
+    for i in range(len(v) - 1, 0, -1):
+        v[i] ^= v[i - 1]
+    if v:
+        v[0] ^= 0xCA
+    return bytes(v)
+
+
 class PanasonicHCException(Exception):
     """PanasonicHC Exception."""
 
@@ -158,6 +177,11 @@ class PanasonicHC:
 
     def on_notification(self, handle: BleakGATTCharacteristic, data: bytes) -> None:
         """Handle data from BLE GATT Notifications."""
+
+        # Log the de-scrambled plaintext of every inbound frame (debug only). Handy for
+        # protocol work: shows fields the parser ignores and the raw bytes of each frame.
+        if _LOGGER.isEnabledFor(logging.DEBUG):
+            _LOGGER.debug("BLE frame: %s", _descramble(data).hex(" "))
 
         try:
             do_callback = False
