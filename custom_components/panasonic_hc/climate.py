@@ -158,7 +158,14 @@ class PanasonicHCClimate(ClimateEntity):
         self._attr_hvac_action = self._get_current_hvac_action()
 
     def _get_current_hvac_action(self) -> HVACAction:
-        """Derive the current HVAC action (idle vs heating/cooling) from status."""
+        """Derive the current HVAC action (idle vs heating/cooling).
+
+        The 0x81 status frame has no reliable "compressor running" bit on tested hardware:
+        the operation byte [3] is always 0, and no other byte tracks heating demand. So
+        infer the action from current vs target temperature, like a thermostat. This may
+        briefly read active just before the compressor spins up, but it correctly tracks
+        idle vs heating/cooling and is satisfied (IDLE) once the setpoint is reached.
+        """
 
         st = self._thermostat.status
         if not st.power:
@@ -167,17 +174,20 @@ class PanasonicHCClimate(ClimateEntity):
             return HVACAction.FAN
         if st.mode == HVACMode.DRY:
             return HVACAction.DRYING
-        if not st.operating:
-            # Unit is on but not actively conditioning (setpoint satisfied).
+
+        cur, target = st.curtemp, st.settemp
+        if not cur or not target:
             return HVACAction.IDLE
         if st.mode == HVACMode.COOL:
-            return HVACAction.COOLING
+            return HVACAction.COOLING if cur > target else HVACAction.IDLE
         if st.mode == HVACMode.HEAT:
-            return HVACAction.HEATING
+            return HVACAction.HEATING if cur < target else HVACAction.IDLE
         # AUTO: infer direction from current vs target temperature.
-        if st.curtemp and st.settemp and st.curtemp > st.settemp:
+        if cur > target:
             return HVACAction.COOLING
-        return HVACAction.HEATING
+        if cur < target:
+            return HVACAction.HEATING
+        return HVACAction.IDLE
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
