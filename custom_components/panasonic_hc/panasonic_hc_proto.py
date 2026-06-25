@@ -121,11 +121,11 @@ class PanasonicBLEParcel:
             self.temp = (self.pdata[4] - 70) / 2
             self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
             self.powersave = self.pdata[8]
-            # Compressor/thermo state: byte[2] bit 0x02 is set while the unit is actively
-            # heating/cooling and clears when idle/satisfied. Confirmed from a BLE capture
-            # (one clean 0x02 -> 0x00 transition per cycle, tracking the real compressor
-            # including its start/stop lag). The earlier guess of byte[3] is always 0 on
-            # real hardware. (Cooling/defrost states best re-confirmed on hardware.)
+            # NOTE: no reliable "compressor running" bit has been found in this frame.
+            # byte[3] is always 0; byte[2] bit 0x02 looked promising but reads "on" with no
+            # heating demand and sticks across mode changes, so it is NOT used for
+            # HVACAction (which is derived from current-vs-target temperature instead).
+            # Kept here only as a raw flag for future investigation.
             self.operating = bool(self.pdata[2] & 0x02) if len(self.pdata) > 2 else False
 
             if len(self.pdata) >= 6:
