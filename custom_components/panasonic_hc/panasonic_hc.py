@@ -17,6 +17,7 @@ from .panasonic_hc_proto import (
     PanasonicBLEErrorReq,
     PanasonicBLEFanMode,
     PanasonicBLEMode,
+    PanasonicBLENanoe,
     PanasonicBLEParcel,
     PanasonicBLEPower,
     PanasonicBLEPowerReq,
@@ -81,6 +82,7 @@ class PanasonicHC:
         self.consumption = [0] * 48
         self.outdoor_temp = None
         self.error_code = None
+        self.nanoe = None
 
     @property
     def is_connected(self) -> bool:
@@ -191,6 +193,11 @@ class PanasonicHC:
                     self.error_code = packet.error
                     do_callback = True
                 elif isinstance(
+                    packet, PanasonicBLEParcel.PanasonicBLEPacketNanoe
+                ):
+                    self.nanoe = packet.nanoe
+                    do_callback = True
+                elif isinstance(
                     packet, PanasonicBLEParcel.PanasonicBLEPacketConsumption
                 ):
                     if packet.hour is not None:
@@ -250,3 +257,12 @@ class PanasonicHC:
         """Toggle EnergySaving mode."""
 
         await self._async_write_command(PanasonicBLEEnergySaving(state))
+
+    async def async_set_nanoe(self, state: bool):
+        """Turn nanoeX on or off (applies to all indoor units)."""
+
+        await self._async_write_command(PanasonicBLENanoe(state))
+        # Reflect optimistically; the device also confirms via a 0x5C notification.
+        self.nanoe = state
+        for callback in self._on_update_callbacks:
+            callback()

@@ -99,6 +99,8 @@ class PanasonicBLEParcel:
                 return PanasonicBLEParcel.PanasonicBLEPacketConsumption(ptype, pdata)
             if ptype == 39:
                 return PanasonicBLEParcel.PanasonicBLEPacketError(ptype, pdata)
+            if ptype == 92 and plen >= 2:
+                return PanasonicBLEParcel.PanasonicBLEPacketNanoe(ptype, pdata)
 
             return PanasonicBLEParcel.PanasonicBLEPacket(ptype, pdata)
 
@@ -164,6 +166,13 @@ class PanasonicBLEParcel:
             code = pdata[2] if len(pdata) > 2 else 0
             self.error = f"{'ACEFHJLP'[(code >> 5) & 7]}{code & 0x1F:02d}"
 
+    class PanasonicBLEPacketNanoe(PanasonicBLEPacket):
+        def __init__(self, ptype, pdata):
+            super().__init__(ptype, pdata)
+            # Field 0x5C (92): byte[1] bit0 = nanoeX on, bit2 = internal cleaning on
+            # (decompiled NanoeXSettingsInteractor).
+            self.nanoe = bool(pdata[1] & 1)
+
     class PanasonicBLEPacketConsumption(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
             self.hour = None
@@ -189,6 +198,7 @@ class PanasonicBLEParcel:
         O_UNIT1 = 9
         ALL_UNITS = 247
         APP = 249
+        ALL_I_UNIT = 251
         BLE_MODULE_UART = 254
 
     class OPERATION(Enum):
@@ -329,6 +339,21 @@ class PanasonicBLEErrorReq(PanasonicBLEParcel):
             dst="I_UNIT1",
             op="REQ",
             packets=[PanasonicBLEParcel.PanasonicBLEPacket(39, bytes([1, 3]))],
+        )
+
+
+class PanasonicBLENanoe(PanasonicBLEParcel):
+    def __init__(self, on):
+        # Field 0x5C nanoeX: byte[1] bit1 (0x02) = "field present", bit0 (0x01) = on.
+        # So ON = [0x00, 0x03], OFF = [0x00, 0x02]. Sent to all indoor units, matching
+        # the official app's NanoeXSettingsInteractor.
+        super().__init__(
+            src="APP",
+            dst="ALL_I_UNIT",
+            op="SET",
+            packets=[
+                PanasonicBLEParcel.PanasonicBLEPacket(92, bytes([0, 3 if on else 2]))
+            ],
         )
 
 
