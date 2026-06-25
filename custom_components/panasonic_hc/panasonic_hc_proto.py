@@ -121,10 +121,12 @@ class PanasonicBLEParcel:
             self.temp = (self.pdata[4] - 70) / 2
             self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
             self.powersave = self.pdata[8]
-            # Operation bitmask: 0 == idle/satisfied, nonzero == actively running.
-            # Reverse-engineered from the official app (y/b.java:177-183). Used for
-            # HVACAction (idle vs heating/cooling). Bit semantics best confirmed on hardware.
-            self.operating = bool(self.pdata[3]) if len(self.pdata) > 3 else False
+            # Compressor/thermo state: byte[2] bit 0x02 is set while the unit is actively
+            # heating/cooling and clears when idle/satisfied. Confirmed from a BLE capture
+            # (one clean 0x02 -> 0x00 transition per cycle, tracking the real compressor
+            # including its start/stop lag). The earlier guess of byte[3] is always 0 on
+            # real hardware. (Cooling/defrost states best re-confirmed on hardware.)
+            self.operating = bool(self.pdata[2] & 0x02) if len(self.pdata) > 2 else False
 
             if len(self.pdata) >= 6:
                 self.curtemp = (self.pdata[5] - 70) / 2

@@ -160,11 +160,10 @@ class PanasonicHCClimate(ClimateEntity):
     def _get_current_hvac_action(self) -> HVACAction:
         """Derive the current HVAC action (idle vs heating/cooling).
 
-        The 0x81 status frame has no reliable "compressor running" bit on tested hardware:
-        the operation byte [3] is always 0, and no other byte tracks heating demand. So
-        infer the action from current vs target temperature, like a thermostat. This may
-        briefly read active just before the compressor spins up, but it correctly tracks
-        idle vs heating/cooling and is satisfied (IDLE) once the setpoint is reached.
+        Uses the unit's real compressor/thermo state (status byte[2] bit 0x02): IDLE when
+        the unit is on but not actively conditioning, HEATING/COOLING when it is. This
+        reflects the actual compressor (including its start/stop lag), not just whether the
+        setpoint is above/below the room.
         """
 
         st = self._thermostat.status
@@ -174,20 +173,17 @@ class PanasonicHCClimate(ClimateEntity):
             return HVACAction.FAN
         if st.mode == HVACMode.DRY:
             return HVACAction.DRYING
-
-        cur, target = st.curtemp, st.settemp
-        if not cur or not target:
+        if not st.operating:
+            # On but not actively conditioning (setpoint satisfied / compressor off).
             return HVACAction.IDLE
         if st.mode == HVACMode.COOL:
-            return HVACAction.COOLING if cur > target else HVACAction.IDLE
-        if st.mode == HVACMode.HEAT:
-            return HVACAction.HEATING if cur < target else HVACAction.IDLE
-        # AUTO: infer direction from current vs target temperature.
-        if cur > target:
             return HVACAction.COOLING
-        if cur < target:
+        if st.mode == HVACMode.HEAT:
             return HVACAction.HEATING
-        return HVACAction.IDLE
+        # AUTO: infer direction from current vs target temperature.
+        if st.curtemp and st.settemp and st.curtemp > st.settemp:
+            return HVACAction.COOLING
+        return HVACAction.HEATING
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
