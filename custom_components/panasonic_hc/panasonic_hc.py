@@ -49,6 +49,7 @@ class Status:
         curtemp: float,
         settemp: float,
         fanspeed: str,
+        operating: bool = False,
     ) -> None:
         """Initialise Status."""
 
@@ -58,6 +59,7 @@ class Status:
         self.curtemp = curtemp
         self.settemp = settemp
         self.fanspeed = fanspeed
+        self.operating = operating
 
 
 class PanasonicHC:
@@ -169,6 +171,7 @@ class PanasonicHC:
                         packet.curtemp,
                         packet.temp,
                         packet.fanspeed.name,
+                        packet.operating,
                     )
                     do_callback = True
                 elif isinstance(
@@ -218,9 +221,14 @@ class PanasonicHC:
         await self._async_write_command(PanasonicBLEMode(MODE[mode].value))
 
     async def async_set_fanmode(self, mode: str):
-        """Set thermostat mode."""
+        """Set fan speed for the current operating mode."""
 
-        await self._async_write_command(PanasonicBLEFanMode(FANSPEED[mode].value))
+        # Target the current mode's fan profile (MODE values equal the 0x4C nibbles)
+        # so fan speed also applies in fan_only/dry/auto, not just heat/cool.
+        nibble = MODE[self.status.mode].value if self.status else MODE.heat.value
+        await self._async_write_command(
+            PanasonicBLEFanMode(FANSPEED[mode].value, nibble)
+        )
 
     async def async_set_energysaving(self, state: bool):
         """Toggle EnergySaving mode."""

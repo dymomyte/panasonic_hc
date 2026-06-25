@@ -111,10 +111,16 @@ class PanasonicBLEParcel:
             super().__init__(ptype, pdata)
             self.curtemp = 0
             self.power = self.pdata[0] & 1
-            self.mode = MODE((self.pdata[0] >> 5) & 7)
+            # The unit reports 6 (auto_cool) while in auto mode; map it to auto (5).
+            m = (self.pdata[0] >> 5) & 7
+            self.mode = MODE(5 if m == 6 else m)
             self.temp = (self.pdata[4] - 70) / 2
             self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
             self.powersave = self.pdata[8]
+            # Operation bitmask: 0 == idle/satisfied, nonzero == actively running.
+            # Reverse-engineered from the official app (y/b.java:177-183). Used for
+            # HVACAction (idle vs heating/cooling). Bit semantics best confirmed on hardware.
+            self.operating = bool(self.pdata[3]) if len(self.pdata) > 3 else False
 
             if len(self.pdata) >= 6:
                 self.curtemp = (self.pdata[5] - 70) / 2
@@ -248,14 +254,19 @@ class PanasonicBLEMode(PanasonicBLEParcel):
 
 
 class PanasonicBLEFanMode(PanasonicBLEParcel):
-    def __init__(self, mode):
+    def __init__(self, mode, mode_nibble):
+        # Fan speed is stored per operating mode. The 0x4C packet's low nibble selects
+        # which mode's fan profile to write; 0x10 marks the fan field present. The
+        # original code only wrote nibbles 1 (heat) and 2 (cool), so changing fan speed
+        # had no effect in fan_only/dry/auto. Target the current mode instead.
         super().__init__(
             src="APP",
             dst="I_UNIT1",
             op="SET",
             packets=[
-                PanasonicBLEParcel.PanasonicBLEPacket(76, bytes([17, mode, 0, 0])),
-                PanasonicBLEParcel.PanasonicBLEPacket(76, bytes([18, mode, 0, 0]))
+                PanasonicBLEParcel.PanasonicBLEPacket(
+                    76, bytes([0x10 | mode_nibble, mode, 0, 0])
+                ),
             ],
         )
 

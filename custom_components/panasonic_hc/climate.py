@@ -155,7 +155,29 @@ class PanasonicHCClimate(ClimateEntity):
         self._attr_preset_mode = (
             PRESET_ECO if self._thermostat.status.powersave else PRESET_NONE
         )
-        # self._attr_hvac_action = self._get_current_hvac_action()
+        self._attr_hvac_action = self._get_current_hvac_action()
+
+    def _get_current_hvac_action(self) -> HVACAction:
+        """Derive the current HVAC action (idle vs heating/cooling) from status."""
+
+        st = self._thermostat.status
+        if not st.power:
+            return HVACAction.OFF
+        if st.mode == HVACMode.FAN_ONLY:
+            return HVACAction.FAN
+        if st.mode == HVACMode.DRY:
+            return HVACAction.DRYING
+        if not st.operating:
+            # Unit is on but not actively conditioning (setpoint satisfied).
+            return HVACAction.IDLE
+        if st.mode == HVACMode.COOL:
+            return HVACAction.COOLING
+        if st.mode == HVACMode.HEAT:
+            return HVACAction.HEATING
+        # AUTO: infer direction from current vs target temperature.
+        if st.curtemp and st.settemp and st.curtemp > st.settemp:
+            return HVACAction.COOLING
+        return HVACAction.HEATING
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
