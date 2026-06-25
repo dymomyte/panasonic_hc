@@ -70,7 +70,7 @@ class Status:
         curtemp: float,
         settemp: float,
         fanspeed: str,
-        operating: bool = False,
+        prohibited: bool = False,
     ) -> None:
         """Initialise Status."""
 
@@ -80,7 +80,9 @@ class Status:
         self.curtemp = curtemp
         self.settemp = settemp
         self.fanspeed = fanspeed
-        self.operating = operating
+        # Whether any operation is currently locked/restricted on the unit (RC lock /
+        # central control). Not used for HVACAction; available for a future "locked" sensor.
+        self.prohibited = prohibited
 
 
 class PanasonicHC:
@@ -202,7 +204,7 @@ class PanasonicHC:
                         packet.curtemp,
                         packet.temp,
                         packet.fanspeed.name,
-                        packet.operating,
+                        packet.prohibited,
                     )
                     do_callback = True
                 elif isinstance(

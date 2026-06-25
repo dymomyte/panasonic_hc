@@ -121,12 +121,13 @@ class PanasonicBLEParcel:
             self.temp = (self.pdata[4] - 70) / 2
             self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
             self.powersave = self.pdata[8]
-            # NOTE: no reliable "compressor running" bit has been found in this frame.
-            # byte[3] is always 0; byte[2] bit 0x02 looked promising but reads "on" with no
-            # heating demand and sticks across mode changes, so it is NOT used for
-            # HVACAction (which is derived from current-vs-target temperature instead).
-            # Kept here only as a raw flag for future investigation.
-            self.operating = bool(self.pdata[2] & 0x02) if len(self.pdata) > 2 else False
+            # byte[3] is the operation-PROHIBITED / RC-lock bitmask (which functions are
+            # locked/restricted: bit0 start-stop, bit1 mode, bit2 set-temp, bit3 fan,
+            # bit4 flap, bit5 energy-saving). In the official app it drives the
+            # "layout_prohibited" lock overlay - it is NOT a "running/idle" bit (it stays 0
+            # while heating). There is no reliable compressor-running bit in this frame, so
+            # HVACAction is derived from current-vs-target temperature, not from here.
+            self.prohibited = bool(self.pdata[3]) if len(self.pdata) > 3 else False
 
             if len(self.pdata) >= 6:
                 self.curtemp = (self.pdata[5] - 70) / 2
