@@ -97,6 +97,8 @@ class PanasonicBLEParcel:
 
             if ptype == 105 and pdata[0:3] == bytes([2, 0, 19]):
                 return PanasonicBLEParcel.PanasonicBLEPacketConsumption(ptype, pdata)
+            if ptype == 39:
+                return PanasonicBLEParcel.PanasonicBLEPacketError(ptype, pdata)
 
             return PanasonicBLEParcel.PanasonicBLEPacket(ptype, pdata)
 
@@ -137,14 +139,30 @@ class PanasonicBLEParcel:
             return s
 
     class PanasonicBLEPacketOutdoorTemp(PanasonicBLEPacket):
-        def __init__(self):
+        def __init__(self, ptype, pdata):
             super().__init__(ptype, pdata)
-            self.temp = self.pdata[1] / 10
+            # Field 0x21 (33) is a signed big-endian 16-bit value in tenths of a degree C
+            # (decode confirmed from the decompiled SensorTempParser). The device reports
+            # several sensors distinguished by a sub-index the wire layout here doesn't
+            # expose; raw 0x7FFF / -0x8000 are the "no data" sentinels (9999 / 10000).
+            # NOTE: which sensor this is (outdoor vs coil vs room) is unconfirmed for this
+            # firmware and may need a hardware capture to pin down.
+            raw = int.from_bytes(pdata[0:2], "big", signed=True)
+            self.temp = None if raw in (0x7FFF, -0x8000) else raw / 10
 
         def __str__(self):
             s = super().__str__()
             s += f"\nOutdoor Temp: {self.temp}"
             return s
+
+    class PanasonicBLEPacketError(PanasonicBLEPacket):
+        def __init__(self, ptype, pdata):
+            super().__init__(ptype, pdata)
+            # Field 0x27 (39) alert-history entry: pdata[0..1] = indoor-unit identity word,
+            # pdata[2] = error code byte. Decode per the decompiled ErrorCode class:
+            # letter = "ACEFHJLP"[(b>>5)&7], number = b & 0x1F. "A00" means no fault.
+            code = pdata[2] if len(pdata) > 2 else 0
+            self.error = f"{'ACEFHJLP'[(code >> 5) & 7]}{code & 0x1F:02d}"
 
     class PanasonicBLEPacketConsumption(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
@@ -300,6 +318,17 @@ class PanasonicBLEStatusReq(PanasonicBLEParcel):
             dst="I_UNIT1",
             op="REQ",
             packets=[PanasonicBLEParcel.PanasonicBLEPacket(129, bytes([4, 0, 14]))],
+        )
+
+
+class PanasonicBLEErrorReq(PanasonicBLEParcel):
+    def __init__(self):
+        # Read the most-recent alert-history entry (index 1) for field 0x27.
+        super().__init__(
+            src="APP",
+            dst="I_UNIT1",
+            op="REQ",
+            packets=[PanasonicBLEParcel.PanasonicBLEPacket(39, bytes([1, 3]))],
         )
 
 

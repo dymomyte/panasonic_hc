@@ -14,6 +14,7 @@ from .panasonic_hc_proto import (
     FANSPEED,
     MODE,
     PanasonicBLEEnergySaving,
+    PanasonicBLEErrorReq,
     PanasonicBLEFanMode,
     PanasonicBLEMode,
     PanasonicBLEParcel,
@@ -78,6 +79,8 @@ class PanasonicHC:
         self.curhour = None
         self.curindex = None
         self.consumption = [0] * 48
+        self.outdoor_temp = None
+        self.error_code = None
 
     @property
     def is_connected(self) -> bool:
@@ -133,6 +136,8 @@ class PanasonicHC:
             await self._async_write_command(PanasonicBLEPowerReq())
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEPowerReqHour())
+            await asyncio.sleep(0.5)
+            await self._async_write_command(PanasonicBLEErrorReq())
             self.last_update = now
 
     async def _async_write_command(self, command: PanasonicBLEParcel):
@@ -173,6 +178,17 @@ class PanasonicHC:
                         packet.fanspeed.name,
                         packet.operating,
                     )
+                    do_callback = True
+                elif isinstance(
+                    packet, PanasonicBLEParcel.PanasonicBLEPacketOutdoorTemp
+                ):
+                    if packet.temp is not None:
+                        self.outdoor_temp = packet.temp
+                        do_callback = True
+                elif isinstance(
+                    packet, PanasonicBLEParcel.PanasonicBLEPacketError
+                ):
+                    self.error_code = packet.error
                     do_callback = True
                 elif isinstance(
                     packet, PanasonicBLEParcel.PanasonicBLEPacketConsumption
