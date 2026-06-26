@@ -161,9 +161,12 @@ class PanasonicHCClimate(ClimateEntity):
         """Derive the current HVAC action.
 
         Primary running signal is status byte[2] (status.running): clear ⇒ compressor
-        actively heating/cooling, set ⇒ idle/standby ("slight blow"). Defrost and preheating
-        status icons (0x69 sub-23) take precedence as transient active states. Falls back to a
-        current-vs-target temperature estimate only if the running bit isn't available.
+        actively heating/cooling, set ⇒ idle/standby ("slight blow"). The idle bit takes
+        precedence over the preheating icon, because the unit keeps HEAT_PREPARING/OP_PREPARING
+        lit while merely parked in heat mode — so a preparing icon only means a genuine warm-up
+        when the compressor is actually running. Defrost (0x69 sub-23) stays on top since it
+        runs the compressor. Falls back to a current-vs-target estimate only if byte[2] is
+        unavailable.
         """
 
         st = self._thermostat.status
@@ -173,10 +176,10 @@ class PanasonicHCClimate(ClimateEntity):
             return HVACAction.FAN
         if st.mode == HVACMode.DRY:
             return HVACAction.DRYING
+        # Defrost runs the compressor in reverse, so it applies even while byte[2] reads
+        # "running" — keep it as the top heat/cool sub-state.
         if self._thermostat.defrosting:
             return HVACAction.DEFROSTING
-        if self._thermostat.preheating:
-            return HVACAction.PREHEATING
 
         running = st.running
         if running is None:
@@ -188,7 +191,13 @@ class PanasonicHCClimate(ClimateEntity):
                 )
             )
         if not running:
+            # Idle/standby. The unit keeps the HEAT_PREPARING/OP_PREPARING icon lit while parked
+            # in heat mode ("slight blow"), so idle must win over the preheating icon — else it
+            # sticks on "Preheating" whenever it is simply idle.
             return HVACAction.IDLE
+        # Compressor is running: a lit preparing icon now means a genuine warm-up phase.
+        if self._thermostat.preheating:
+            return HVACAction.PREHEATING
         if st.mode == HVACMode.COOL:
             return HVACAction.COOLING
         if st.mode == HVACMode.HEAT:
