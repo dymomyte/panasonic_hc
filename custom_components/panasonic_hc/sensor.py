@@ -43,14 +43,16 @@ async def async_setup_entry(
             PanasonicHCOutdoorTemp(thermostat),
             PanasonicHCFault(thermostat),
             PanasonicHCFaultDescription(thermostat),
-            # Diagnostic service-monitor readings (read via 0x2C). Scaling for temps is
-            # confirmed (÷10 °C); compressor current is shown raw pending hardware check.
+            # Diagnostic service-monitor readings (read via 0x2C to the outdoor unit). Per-code
+            # scaling lives in panasonic_hc.MONITOR_SENSOR_CODES. Outdoor air + outdoor coil
+            # are hardware-confirmed; indoor coil label/scale and compressor-current unit are
+            # pending the service-manual DN table.
             PanasonicHCMonitorSensor(
-                thermostat, "discharge_temp", "Discharge Temperature",
+                thermostat, "outdoor_coil_temp", "Outdoor Coil Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             PanasonicHCMonitorSensor(
-                thermostat, "coil_temp", "Indoor Coil Temperature",
+                thermostat, "indoor_coil_temp", "Indoor Coil Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             PanasonicHCMonitorSensor(

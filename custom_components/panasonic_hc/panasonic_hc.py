@@ -37,17 +37,22 @@ CONSUMPTION_INTERVAL = 300
 
 # Service-monitor "data number" (DN) codes read via field 0x2C to the OUTDOOR unit, from the
 # Remote Controller Servicing Functions table (ECOi/PACi service manual). The unit returns
-# "- - - -" (a sentinel) for codes it doesn't support. The reply is the displayed value
-# directly: temps are whole degrees C (hardware-confirmed: outdoor air raw 6 == 6 C).
+# "- - - -" (a sentinel) for codes it doesn't support.
+#
+# Each entry is (code, key, scale): the reply is a signed big-endian 16-bit raw value and the
+# displayed value = raw * scale. Scaling is PER-CODE -- Panasonic's monitor table mixes
+# whole-degree (x1) and tenth-degree (x0.1) fields, so there is no single global divisor.
+# Hardware-confirmed: outdoor air (0x11) raw 6 == 6 C (x1); outdoor coil (0x06) raw -29 ==
+# -2.9 C (x0.1, a healthy evaporator temp heating against 6 C ambient).
 MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current -> "running" signal, polled often
+MONITOR_COMPRESSOR_SCALE = 1.0  # unit/scaling unconfirmed (raw ~3 while running)
 MONITOR_SENSOR_CODES = [
-    (0x11, "outdoor_temp"),    # Outdoor air temp (confirmed: matches a backyard sensor)
-    # NOTE: the next two use the ECOi DN numbering; on the PACi outdoor unit the labels and/or
-    # scaling are unconfirmed. 0x06 currently reads implausibly low for a compressor discharge
-    # (~-29 C), so it may be a different sensor on this model -- verify against the PACi service
-    # manual before trusting the label.
-    (0x06, "discharge_temp"),  # ECOi: indoor discharge temp (PACi label unconfirmed)
-    (0x03, "coil_temp"),       # ECOi: indoor heat-exchanger E1 (PACi label unconfirmed)
+    (0x11, "outdoor_temp", 1.0),       # Outdoor air temp (confirmed vs a backyard sensor)
+    (0x06, "outdoor_coil_temp", 0.1),  # Outdoor heat-exchanger temp (confirmed: -2.9 C)
+    # 0x03 reads raw 24; whether that is 24 C (x1) or 2.4 C (x0.1) and the true label are
+    # unconfirmed on the PACi -- pending the service-manual DN table. x1 is the plausible guess
+    # for an indoor/condenser coil while heating.
+    (0x03, "indoor_coil_temp", 1.0),   # ECOi: indoor heat-exchanger E1 (scale unconfirmed)
 ]
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
 
@@ -206,17 +211,19 @@ class PanasonicHC:
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEErrorReq())
             await asyncio.sleep(0.5)
-            await self._read_monitor(MONITOR_COMPRESSOR_CODE, "compressor_current")
-            for code, key in MONITOR_SENSOR_CODES:
+            await self._read_monitor(
+                MONITOR_COMPRESSOR_CODE, "compressor_current", MONITOR_COMPRESSOR_SCALE
+            )
+            for code, key, scale in MONITOR_SENSOR_CODES:
                 await asyncio.sleep(0.5)
-                await self._read_monitor(code, key)
+                await self._read_monitor(code, key, scale)
             self.last_update = now
 
-    async def _read_monitor(self, code: int, key: str) -> None:
-        """Request one service-monitor code (0x2C). The reply is matched to `key` in
+    async def _read_monitor(self, code: int, key: str, scale: float) -> None:
+        """Request one service-monitor code (0x2C). The reply is matched to (key, scale) in
         on_notification (one read in flight at a time, so request order = reply order)."""
 
-        self._monitor_pending = key
+        self._monitor_pending = (key, scale)
         await self._async_write_command(PanasonicBLEMonitorReq(code))
         await asyncio.sleep(0.8)  # allow the 0x2C reply to arrive and be recorded
 
@@ -282,16 +289,14 @@ class PanasonicHC:
                     self.nanoe = packet.nanoe
                     do_callback = True
                 elif packet.ptype == 0x2C and self._monitor_pending:
-                    # Reply to a service-monitor read (matched to the pending code).
-                    key = self._monitor_pending
+                    # Reply to a service-monitor read (matched to the pending key+scale).
+                    key, scale = self._monitor_pending
                     self._monitor_pending = None
                     if len(packet.pdata) >= 2:
                         raw = int.from_bytes(packet.pdata[0:2], "big", signed=True)
                         if raw not in MONITOR_SENTINELS:
-                            # The 0x2C RC-monitor value is the displayed reading directly:
-                            # temps are whole degrees C (not tenths) and current is as-is.
-                            # Confirmed on hardware: outdoor air raw 6 == 6 C.
-                            value = raw
+                            # Displayed value = raw * per-code scale (see MONITOR_SENSOR_CODES).
+                            value = round(raw * scale, 1)
                             self.monitor[key] = value
                             if key == "outdoor_temp":
                                 self.outdoor_temp = value
