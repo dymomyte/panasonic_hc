@@ -128,6 +128,12 @@ class PanasonicBLEParcel:
             # while heating). There is no reliable compressor-running bit in this frame, so
             # HVACAction is derived from current-vs-target temperature, not from here.
             self.prohibited = bool(self.pdata[3]) if len(self.pdata) > 3 else False
+            # byte[2] bit 0x02 is the thermo/compressor state: SET (0x02) = idle/standby
+            # (the "indoor unit is stopped or slight blow operation" wall-icon), CLEAR (0x00)
+            # = actively heating/cooling. Confirmed on hardware incl. the compressor start
+            # lag. (Polarity is inverted vs the naive reading — that caused the old stuck
+            # "Heating".) None when the byte isn't present.
+            self.running = (self.pdata[2] & 0x02) == 0 if len(self.pdata) > 2 else None
 
             if len(self.pdata) >= 6:
                 self.curtemp = (self.pdata[5] - 70) / 2
@@ -356,6 +362,20 @@ class PanasonicBLEMonitorReq(PanasonicBLEParcel):
             dst="I_UNIT1",
             op="REQ",
             packets=[PanasonicBLEParcel.PanasonicBLEPacket(0x2C, bytes([0x08, 0x00, code, 0x02]))],
+        )
+
+
+class PanasonicBLEIconReq(PanasonicBLEParcel):
+    def __init__(self, code):
+        # Read a status-icon (SettingIcon mDn `code`) via the 0x69 sub-23 "setting function"
+        # query, as the app's Information screen does. Reply 0x69 value = [2,0,23,code,active];
+        # active (byte[4]) != 0 means the icon is lit. Codes: 9 heat-preparing, 10 op-preparing,
+        # 11 defrost. Sent to the BLE module (which aggregates the controller's icon state).
+        super().__init__(
+            src="APP",
+            dst="BLE_MODULE_UART",
+            op="REQ",
+            packets=[PanasonicBLEParcel.PanasonicBLEPacket(0x69, bytes([2, 0, 23, code, 5]))],
         )
 
 

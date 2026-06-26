@@ -16,6 +16,7 @@ from .panasonic_hc_proto import (
     PanasonicBLEEnergySaving,
     PanasonicBLEErrorReq,
     PanasonicBLEFanMode,
+    PanasonicBLEIconReq,
     PanasonicBLEMode,
     PanasonicBLEMonitorReq,
     PanasonicBLENanoe,
@@ -45,6 +46,12 @@ MONITOR_SENSOR_CODES = [
 ]
 MONITOR_TEMP_KEYS = {"outdoor_temp", "discharge_temp", "coil_temp"}
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
+
+# Status-icon (SettingIcon mDn) codes polled via the 0x69 sub-23 query, mapped to the HVAC
+# action they represent: 9/10 = preheating/preparing, 11 = defrost.
+ICON_PREHEATING = (9, 10)
+ICON_DEFROST = 11
+ICON_CODES = (9, 10, 11)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -84,6 +91,7 @@ class Status:
         settemp: float,
         fanspeed: str,
         prohibited: bool = False,
+        running: bool | None = None,
     ) -> None:
         """Initialise Status."""
 
@@ -96,6 +104,9 @@ class Status:
         # Whether any operation is currently locked/restricted on the unit (RC lock /
         # central control). Not used for HVACAction; available for a future "locked" sensor.
         self.prohibited = prohibited
+        # Compressor/thermo running (status byte[2]): True = actively heating/cooling,
+        # False = idle/standby ("slight blow"), None = unknown. Drives HVACAction.
+        self.running = running
 
 
 class PanasonicHC:
@@ -117,11 +128,14 @@ class PanasonicHC:
         self.outdoor_temp = None
         self.error_code = None
         self.nanoe = None
-        # Service-monitor readings (key -> value) and derived compressor state.
+        # Service-monitor readings (key -> value) and compressor current (diagnostic).
         self.monitor: dict[str, float] = {}
         self.compressor_current = None
-        self.compressor_running = None
         self._monitor_pending: str | None = None
+        # Status-icon flags (from 0x69 sub-23) -> HVAC action preheating/defrosting.
+        self._icons: dict[int, bool] = {}
+        self.preheating = None
+        self.defrosting = None
 
     @property
     def is_connected(self) -> bool:
@@ -167,14 +181,15 @@ class PanasonicHC:
     async def async_get_status(self) -> None:
         """Query current status."""
 
-        # always update status
+        # always update status (the 0x81 reply carries the compressor/idle bit, byte[2])
         await self._async_write_command(PanasonicBLEStatusReq())
 
-        # compressor current every cycle -> drives the HVAC action (idle vs heating)
-        await asyncio.sleep(0.5)
-        await self._read_monitor(MONITOR_COMPRESSOR_CODE, "compressor_current")
+        # poll the preheating/defrost status icons every cycle -> HVAC action precedence
+        for code in ICON_CODES:
+            await asyncio.sleep(0.4)
+            await self._async_write_command(PanasonicBLEIconReq(code))
 
-        # update consumption + slower monitors if interval has passed
+        # update consumption + slower diagnostics if interval has passed
         now = time.time()
         if now > self.last_update + CONSUMPTION_INTERVAL:
             await asyncio.sleep(0.5)
@@ -183,6 +198,8 @@ class PanasonicHC:
             await self._async_write_command(PanasonicBLEPowerReqHour())
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEErrorReq())
+            await asyncio.sleep(0.5)
+            await self._read_monitor(MONITOR_COMPRESSOR_CODE, "compressor_current")
             for code, key in MONITOR_SENSOR_CODES:
                 await asyncio.sleep(0.5)
                 await self._read_monitor(code, key)
@@ -238,6 +255,7 @@ class PanasonicHC:
                         packet.temp,
                         packet.fanspeed.name,
                         packet.prohibited,
+                        packet.running,
                     )
                     do_callback = True
                 elif isinstance(
@@ -269,8 +287,17 @@ class PanasonicHC:
                                 self.outdoor_temp = value
                             elif key == "compressor_current":
                                 self.compressor_current = value
-                                self.compressor_running = raw != 0
                             do_callback = True
+                elif (
+                    packet.ptype == 0x69
+                    and len(packet.pdata) >= 5
+                    and packet.pdata[2] == 23
+                ):
+                    # Status-icon reply (0x69 sub-23): pdata[3]=icon mDn, pdata[4]=active.
+                    self._icons[packet.pdata[3]] = packet.pdata[4] != 0
+                    self.preheating = any(self._icons.get(c) for c in ICON_PREHEATING)
+                    self.defrosting = bool(self._icons.get(ICON_DEFROST))
+                    do_callback = True
                 elif isinstance(
                     packet, PanasonicBLEParcel.PanasonicBLEPacketConsumption
                 ):

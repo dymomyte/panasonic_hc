@@ -158,13 +158,12 @@ class PanasonicHCClimate(ClimateEntity):
         self._attr_hvac_action = self._get_current_hvac_action()
 
     def _get_current_hvac_action(self) -> HVACAction:
-        """Derive the current HVAC action (idle vs heating/cooling).
+        """Derive the current HVAC action.
 
-        Primary signal is the real compressor current (service-monitor code 0x14 / CT2):
-        nonzero ⇒ the compressor is actually running. If that reading isn't available
-        (not yet polled, or the code isn't supported on this unit), fall back to a
-        current-vs-target temperature demand estimate, which is stateless and can't get
-        stuck (the 0x81 status has no reliable running bit — byte[3] is a lock mask).
+        Primary running signal is status byte[2] (status.running): clear ⇒ compressor
+        actively heating/cooling, set ⇒ idle/standby ("slight blow"). Defrost and preheating
+        status icons (0x69 sub-23) take precedence as transient active states. Falls back to a
+        current-vs-target temperature estimate only if the running bit isn't available.
         """
 
         st = self._thermostat.status
@@ -174,10 +173,14 @@ class PanasonicHCClimate(ClimateEntity):
             return HVACAction.FAN
         if st.mode == HVACMode.DRY:
             return HVACAction.DRYING
+        if self._thermostat.defrosting:
+            return HVACAction.DEFROSTING
+        if self._thermostat.preheating:
+            return HVACAction.PREHEATING
 
-        running = self._thermostat.compressor_running
+        running = st.running
         if running is None:
-            # No compressor reading available — fall back to temperature demand.
+            # No running bit available — fall back to temperature demand.
             cur, target = st.curtemp, st.settemp
             running = bool(
                 cur and target and (
