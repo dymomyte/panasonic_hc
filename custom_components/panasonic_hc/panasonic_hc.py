@@ -184,11 +184,6 @@ class PanasonicHC:
         # always update status (the 0x81 reply carries the compressor/idle bit, byte[2])
         await self._async_write_command(PanasonicBLEStatusReq())
 
-        # poll the preheating/defrost status icons every cycle -> HVAC action precedence
-        for code in ICON_CODES:
-            await asyncio.sleep(0.4)
-            await self._async_write_command(PanasonicBLEIconReq(code))
-
         # update consumption + slower diagnostics if interval has passed
         now = time.time()
         if now > self.last_update + CONSUMPTION_INTERVAL:
@@ -203,6 +198,13 @@ class PanasonicHC:
             for code, key in MONITOR_SENSOR_CODES:
                 await asyncio.sleep(0.5)
                 await self._read_monitor(code, key)
+            # Poll the preheating/defrost status icons (0x69 sub-23). These match the official
+            # app byte-for-byte but go unanswered on the PACi NX, so they live here in the slow
+            # block rather than hammering the 10 s status loop; HVACAction falls back to the
+            # byte[2] running bit when they stay unset.
+            for code in ICON_CODES:
+                await asyncio.sleep(0.4)
+                await self._async_write_command(PanasonicBLEIconReq(code))
             self.last_update = now
 
     async def _read_monitor(self, code: int, key: str) -> None:

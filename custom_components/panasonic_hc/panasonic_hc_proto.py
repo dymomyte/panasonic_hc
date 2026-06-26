@@ -357,9 +357,18 @@ class PanasonicBLEMonitorReq(PanasonicBLEParcel):
         # ("RC monitor"), exactly as the app's Sensor Info screen does. Payload =
         # [unitWord_hi, unitWord_lo, code, 0x02]; 0x0800 is the unit word for a single
         # indoor unit (group 1 / address 1). Reply 0x2C = signed big-endian 16-bit value.
+        #
+        # DESTINATION = O_UNIT1 (the outdoor unit), not the indoor unit. The app's
+        # SensorInfoQueryCommands sends every 0x2C DN-code read to `indoorUnit.d`, which
+        # UnitStructureParser sets to the *synthesised outdoor* address O_UNIT1 (= 9), while
+        # only the 0x21 analog-temp read (i==256) and the 0x69 RC-temp reads go to the indoor
+        # side. These DN codes are outdoor/refrigerant-circuit sensors (outdoor air, discharge,
+        # compressor current, indoor coil reported by the outdoor controller), so the outdoor
+        # unit answers them. Addressing 0x2C to I_UNIT1 — as this did before — gets no reply at
+        # all (confirmed by a 2 h frame capture with zero 0x2C frames).
         super().__init__(
             src="APP",
-            dst="I_UNIT1",
+            dst="O_UNIT1",
             op="REQ",
             packets=[PanasonicBLEParcel.PanasonicBLEPacket(0x2C, bytes([0x08, 0x00, code, 0x02]))],
         )
