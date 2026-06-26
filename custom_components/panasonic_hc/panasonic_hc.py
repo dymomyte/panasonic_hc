@@ -17,6 +17,7 @@ from .panasonic_hc_proto import (
     PanasonicBLEErrorReq,
     PanasonicBLEFanMode,
     PanasonicBLEMode,
+    PanasonicBLEMonitorReq,
     PanasonicBLENanoe,
     PanasonicBLEParcel,
     PanasonicBLEPower,
@@ -32,6 +33,18 @@ MAX_TEMP = 32  # FIXME: check these
 BLE_CHAR_WRITE = "4d200002-eff3-4362-b090-a04cab3f1da0"
 BLE_CHAR_NOTIFY = "4d200003-eff3-4362-b090-a04cab3f1da0"
 CONSUMPTION_INTERVAL = 300
+
+# Service-monitor "data number" (DN) codes read via field 0x2C, from the controller's
+# Remote Controller Servicing Functions table (ECOi/PACi service manual). The unit returns
+# "- - - -" (a sentinel) for codes it doesn't support. Codes/scaling confirmed-on-hardware.
+MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current (A) -> "running" signal, polled often
+MONITOR_SENSOR_CODES = [
+    (0x11, "outdoor_temp"),   # Outdoor air temp
+    (0x06, "discharge_temp"),  # Indoor discharge temp
+    (0x03, "coil_temp"),       # Indoor heat-exchanger E1
+]
+MONITOR_TEMP_KEYS = {"outdoor_temp", "discharge_temp", "coil_temp"}
+MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +117,11 @@ class PanasonicHC:
         self.outdoor_temp = None
         self.error_code = None
         self.nanoe = None
+        # Service-monitor readings (key -> value) and derived compressor state.
+        self.monitor: dict[str, float] = {}
+        self.compressor_current = None
+        self.compressor_running = None
+        self._monitor_pending: str | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -152,7 +170,11 @@ class PanasonicHC:
         # always update status
         await self._async_write_command(PanasonicBLEStatusReq())
 
-        # update consumption if interval has passed
+        # compressor current every cycle -> drives the HVAC action (idle vs heating)
+        await asyncio.sleep(0.5)
+        await self._read_monitor(MONITOR_COMPRESSOR_CODE, "compressor_current")
+
+        # update consumption + slower monitors if interval has passed
         now = time.time()
         if now > self.last_update + CONSUMPTION_INTERVAL:
             await asyncio.sleep(0.5)
@@ -161,7 +183,18 @@ class PanasonicHC:
             await self._async_write_command(PanasonicBLEPowerReqHour())
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEErrorReq())
+            for code, key in MONITOR_SENSOR_CODES:
+                await asyncio.sleep(0.5)
+                await self._read_monitor(code, key)
             self.last_update = now
+
+    async def _read_monitor(self, code: int, key: str) -> None:
+        """Request one service-monitor code (0x2C). The reply is matched to `key` in
+        on_notification (one read in flight at a time, so request order = reply order)."""
+
+        self._monitor_pending = key
+        await self._async_write_command(PanasonicBLEMonitorReq(code))
+        await asyncio.sleep(0.8)  # allow the 0x2C reply to arrive and be recorded
 
     async def _async_write_command(self, command: PanasonicBLEParcel):
         """Write a command to the write characteristic."""
@@ -223,6 +256,21 @@ class PanasonicHC:
                 ):
                     self.nanoe = packet.nanoe
                     do_callback = True
+                elif packet.ptype == 0x2C and self._monitor_pending:
+                    # Reply to a service-monitor read (matched to the pending code).
+                    key = self._monitor_pending
+                    self._monitor_pending = None
+                    if len(packet.pdata) >= 2:
+                        raw = int.from_bytes(packet.pdata[0:2], "big", signed=True)
+                        if raw not in MONITOR_SENTINELS:
+                            value = raw / 10 if key in MONITOR_TEMP_KEYS else raw
+                            self.monitor[key] = value
+                            if key == "outdoor_temp":
+                                self.outdoor_temp = value
+                            elif key == "compressor_current":
+                                self.compressor_current = value
+                                self.compressor_running = raw != 0
+                            do_callback = True
                 elif isinstance(
                     packet, PanasonicBLEParcel.PanasonicBLEPacketConsumption
                 ):

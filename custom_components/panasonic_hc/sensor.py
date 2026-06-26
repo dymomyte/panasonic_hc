@@ -4,7 +4,11 @@ import logging
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory, UnitOfEnergy, UnitOfTemperature
+from homeassistant.const import (
+    EntityCategory,
+    UnitOfEnergy,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant, callback
 import homeassistant.helpers.device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
@@ -39,6 +43,19 @@ async def async_setup_entry(
             PanasonicHCOutdoorTemp(thermostat),
             PanasonicHCFault(thermostat),
             PanasonicHCFaultDescription(thermostat),
+            # Diagnostic service-monitor readings (read via 0x2C). Scaling for temps is
+            # confirmed (÷10 °C); compressor current is shown raw pending hardware check.
+            PanasonicHCMonitorSensor(
+                thermostat, "discharge_temp", "Discharge Temperature",
+                SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
+            ),
+            PanasonicHCMonitorSensor(
+                thermostat, "coil_temp", "Indoor Coil Temperature",
+                SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
+            ),
+            PanasonicHCMonitorSensor(
+                thermostat, "compressor_current", "Compressor Current", None, None,
+            ),
         ],
     )
 
@@ -230,4 +247,27 @@ class PanasonicHCFaultDescription(_PanasonicHCSensorBase):
     def _async_on_updated(self) -> None:
         if self._thermostat.error_code is not None:
             self._attr_native_value = describe_fault(self._thermostat.error_code)
+            self.async_write_ha_state()
+
+
+class PanasonicHCMonitorSensor(_PanasonicHCSensorBase):
+    """Diagnostic sensor backed by a service-monitor reading (thermostat.monitor[key])."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, thermostat: PanasonicHC, key: str, name: str,
+                 device_class, unit) -> None:
+        """Initialize a monitor-backed sensor."""
+
+        super().__init__(thermostat, f"monitor_{key}")
+        self._key = key
+        self._attr_name = name
+        self._attr_device_class = device_class
+        self._attr_native_unit_of_measurement = unit
+
+    @callback
+    def _async_on_updated(self) -> None:
+        if self._key in self._thermostat.monitor:
+            self._attr_native_value = self._thermostat.monitor[self._key]
             self.async_write_ha_state()

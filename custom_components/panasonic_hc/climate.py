@@ -160,12 +160,11 @@ class PanasonicHCClimate(ClimateEntity):
     def _get_current_hvac_action(self) -> HVACAction:
         """Derive the current HVAC action (idle vs heating/cooling).
 
-        The 0x81 status has no byte that reliably tracks the compressor: byte[3] is always 0,
-        and byte[2] (tried previously) reads "on" even with no heating demand and stays set
-        across a mode change (causing a stuck "Heating"). So infer demand from current vs
-        target temperature instead — stateless, so it can't get stuck. It may show active
-        slightly before the compressor actually spins up, but it tracks idle vs
-        heating/cooling and clears to IDLE once the setpoint is satisfied.
+        Primary signal is the real compressor current (service-monitor code 0x14 / CT2):
+        nonzero ⇒ the compressor is actually running. If that reading isn't available
+        (not yet polled, or the code isn't supported on this unit), fall back to a
+        current-vs-target temperature demand estimate, which is stateless and can't get
+        stuck (the 0x81 status has no reliable running bit — byte[3] is a lock mask).
         """
 
         st = self._thermostat.status
@@ -176,19 +175,25 @@ class PanasonicHCClimate(ClimateEntity):
         if st.mode == HVACMode.DRY:
             return HVACAction.DRYING
 
-        cur, target = st.curtemp, st.settemp
-        if not cur or not target:
+        running = self._thermostat.compressor_running
+        if running is None:
+            # No compressor reading available — fall back to temperature demand.
+            cur, target = st.curtemp, st.settemp
+            running = bool(
+                cur and target and (
+                    cur > target if st.mode == HVACMode.COOL else cur < target
+                )
+            )
+        if not running:
             return HVACAction.IDLE
         if st.mode == HVACMode.COOL:
-            return HVACAction.COOLING if cur > target else HVACAction.IDLE
-        if st.mode == HVACMode.HEAT:
-            return HVACAction.HEATING if cur < target else HVACAction.IDLE
-        # AUTO: infer direction from current vs target temperature.
-        if cur > target:
             return HVACAction.COOLING
-        if cur < target:
+        if st.mode == HVACMode.HEAT:
             return HVACAction.HEATING
-        return HVACAction.IDLE
+        # AUTO: infer direction from current vs target temperature.
+        if st.curtemp and st.settemp and st.curtemp > st.settemp:
+            return HVACAction.COOLING
+        return HVACAction.HEATING
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""

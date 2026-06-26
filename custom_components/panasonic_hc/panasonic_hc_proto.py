@@ -345,6 +345,20 @@ class PanasonicBLEErrorReq(PanasonicBLEParcel):
         )
 
 
+class PanasonicBLEMonitorReq(PanasonicBLEParcel):
+    def __init__(self, code):
+        # Read a service-monitor sensor by its data-number (DN) code via field 0x2C
+        # ("RC monitor"), exactly as the app's Sensor Info screen does. Payload =
+        # [unitWord_hi, unitWord_lo, code, 0x02]; 0x0800 is the unit word for a single
+        # indoor unit (group 1 / address 1). Reply 0x2C = signed big-endian 16-bit value.
+        super().__init__(
+            src="APP",
+            dst="I_UNIT1",
+            op="REQ",
+            packets=[PanasonicBLEParcel.PanasonicBLEPacket(0x2C, bytes([0x08, 0x00, code, 0x02]))],
+        )
+
+
 class PanasonicBLENanoe(PanasonicBLEParcel):
     def __init__(self, on):
         # Field 0x5C nanoeX: byte[1] bit1 (0x02) = "field present", bit0 (0x01) = on.
