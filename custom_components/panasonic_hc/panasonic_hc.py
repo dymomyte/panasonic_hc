@@ -44,17 +44,29 @@ CONSUMPTION_INTERVAL = 300
 # whole-degree (x1) and tenth-degree (x0.1) fields, so there is no single global divisor.
 # Hardware-confirmed: outdoor air (0x11) raw 6 == 6 C (x1); outdoor coil (0x06) raw -29 ==
 # -2.9 C (x0.1, a healthy evaporator temp heating against 6 C ambient).
+# Code->name from the ECOi R1 service manual "Remote Controller Servicing Functions" table
+# (PACi shares the numbering; single-split uses only the "Unit No.1" column). Per-code scale
+# is NOT documented anywhere -- it is non-uniform (air x1, coil x0.1) and must be calibrated
+# against hardware, hence the sweep below. Scales marked "(unconf)" are best-guesses.
 MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current -> "running" signal, polled often
-MONITOR_COMPRESSOR_SCALE = 1.0  # unit/scaling unconfirmed (raw ~3 while running)
+MONITOR_COMPRESSOR_SCALE = 1.0  # amps; raw ~3 while running == ~3 A (unconf scale)
 MONITOR_SENSOR_CODES = [
-    (0x11, "outdoor_temp", 1.0),       # Outdoor air temp (confirmed vs a backyard sensor)
-    (0x06, "outdoor_coil_temp", 0.1),  # Outdoor heat-exchanger temp (confirmed: -2.9 C)
-    # 0x03 reads raw 24; whether that is 24 C (x1) or 2.4 C (x0.1) and the true label are
-    # unconfirmed on the PACi -- pending the service-manual DN table. x1 is the plausible guess
-    # for an indoor/condenser coil while heating.
-    (0x03, "indoor_coil_temp", 1.0),   # ECOi: indoor heat-exchanger E1 (scale unconfirmed)
+    (0x11, "outdoor_temp", 1.0),            # Outdoor air temp TO (confirmed x1 vs backyard sensor)
+    (0x06, "outdoor_coil_temp", 0.1),       # Outdoor heat-exch temp (confirmed: -2.9 C, x0.1)
+    (0x03, "indoor_coil_temp", 1.0),        # Indoor heat-exch E1 (raw 24; x1==24 C, unconf)
+    (0x02, "room_temp", 1.0),               # Intake / return-air temp TA (x1 unconf)
+    (0x08, "indoor_eev", 1.0),              # Indoor electronic expansion valve position (step)
+    (0x0A, "outdoor_discharge_temp", 1.0),  # Outdoor discharge temp TD (manual: whole C, x1)
+    (0x1D, "low_pressure_temp", 0.1),       # Low-pressure sat. temp / suction (x0.1 unconf)
 ]
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
+
+# Read-only calibration sweep: when DEBUG logging is enabled, probe this documented code range
+# (0x02..0x22) once per diagnostic cycle and log each raw value. This reveals which codes the
+# unit populates and lets per-code scaling be calibrated against a known state. It is a pure
+# read (field 0x2C / op REQ, exactly like the app's Sensor Info screen) and is skipped entirely
+# unless DEBUG is on, so it adds no traffic in normal operation.
+MONITOR_SWEEP_RANGE = range(0x02, 0x23)
 
 # Status-icon (SettingIcon mDn) codes polled via the 0x69 sub-23 query, mapped to the HVAC
 # action they represent: 9/10 = preheating/preparing, 11 = defrost.
@@ -217,7 +229,22 @@ class PanasonicHC:
             for code, key, scale in MONITOR_SENSOR_CODES:
                 await asyncio.sleep(0.5)
                 await self._read_monitor(code, key, scale)
+            if _LOGGER.isEnabledFor(logging.DEBUG):
+                await self._sweep_monitor_codes()
             self.last_update = now
+
+    async def _sweep_monitor_codes(self) -> None:
+        """Read-only calibration sweep over MONITOR_SWEEP_RANGE (DEBUG only).
+
+        Logs the raw signed value of every code so a debug capture reveals which codes the unit
+        populates and lets per-code scaling be calibrated. Values are logged, not stored as
+        entities. Uses the same harmless 0x2C read as the named sensors."""
+
+        for code in MONITOR_SWEEP_RANGE:
+            _LOGGER.debug("monitor sweep -> code 0x%02x", code)
+            self._monitor_pending = (f"sweep_0x{code:02x}", 1.0)
+            await self._async_write_command(PanasonicBLEMonitorReq(code))
+            await asyncio.sleep(1.0)  # generous spacing so each reply matches its request
 
     async def _read_monitor(self, code: int, key: str, scale: float) -> None:
         """Request one service-monitor code (0x2C). The reply is matched to (key, scale) in
@@ -294,7 +321,14 @@ class PanasonicHC:
                     self._monitor_pending = None
                     if len(packet.pdata) >= 2:
                         raw = int.from_bytes(packet.pdata[0:2], "big", signed=True)
-                        if raw not in MONITOR_SENTINELS:
+                        # Calibration aid: log every monitor reply's raw value (and sentinel).
+                        _LOGGER.debug(
+                            "monitor %s: raw=%d (0x%04x)%s",
+                            key, raw, raw & 0xFFFF,
+                            " [no-data]" if raw in MONITOR_SENTINELS else "",
+                        )
+                        # Sweep reads are for logging/calibration only -- don't expose them.
+                        if raw not in MONITOR_SENTINELS and not key.startswith("sweep_"):
                             # Displayed value = raw * per-code scale (see MONITOR_SENSOR_CODES).
                             value = round(raw * scale, 1)
                             self.monitor[key] = value
