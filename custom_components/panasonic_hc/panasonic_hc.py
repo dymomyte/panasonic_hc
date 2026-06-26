@@ -35,16 +35,20 @@ BLE_CHAR_WRITE = "4d200002-eff3-4362-b090-a04cab3f1da0"
 BLE_CHAR_NOTIFY = "4d200003-eff3-4362-b090-a04cab3f1da0"
 CONSUMPTION_INTERVAL = 300
 
-# Service-monitor "data number" (DN) codes read via field 0x2C, from the controller's
+# Service-monitor "data number" (DN) codes read via field 0x2C to the OUTDOOR unit, from the
 # Remote Controller Servicing Functions table (ECOi/PACi service manual). The unit returns
-# "- - - -" (a sentinel) for codes it doesn't support. Codes/scaling confirmed-on-hardware.
-MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current (A) -> "running" signal, polled often
+# "- - - -" (a sentinel) for codes it doesn't support. The reply is the displayed value
+# directly: temps are whole degrees C (hardware-confirmed: outdoor air raw 6 == 6 C).
+MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current -> "running" signal, polled often
 MONITOR_SENSOR_CODES = [
-    (0x11, "outdoor_temp"),   # Outdoor air temp
-    (0x06, "discharge_temp"),  # Indoor discharge temp
-    (0x03, "coil_temp"),       # Indoor heat-exchanger E1
+    (0x11, "outdoor_temp"),    # Outdoor air temp (confirmed: matches a backyard sensor)
+    # NOTE: the next two use the ECOi DN numbering; on the PACi outdoor unit the labels and/or
+    # scaling are unconfirmed. 0x06 currently reads implausibly low for a compressor discharge
+    # (~-29 C), so it may be a different sensor on this model -- verify against the PACi service
+    # manual before trusting the label.
+    (0x06, "discharge_temp"),  # ECOi: indoor discharge temp (PACi label unconfirmed)
+    (0x03, "coil_temp"),       # ECOi: indoor heat-exchanger E1 (PACi label unconfirmed)
 ]
-MONITOR_TEMP_KEYS = {"outdoor_temp", "discharge_temp", "coil_temp"}
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
 
 # Status-icon (SettingIcon mDn) codes polled via the 0x69 sub-23 query, mapped to the HVAC
@@ -184,6 +188,14 @@ class PanasonicHC:
         # always update status (the 0x81 reply carries the compressor/idle bit, byte[2])
         await self._async_write_command(PanasonicBLEStatusReq())
 
+        # Poll the preheating/defrost status icons (0x69 sub-23) every cycle -> HVAC action
+        # precedence. The unit answers these (active byte = 0 when the state is inactive), and
+        # preheating in particular is short-lived, so they need to be polled at the status rate
+        # to be caught rather than parked in the slow diagnostic block.
+        for code in ICON_CODES:
+            await asyncio.sleep(0.4)
+            await self._async_write_command(PanasonicBLEIconReq(code))
+
         # update consumption + slower diagnostics if interval has passed
         now = time.time()
         if now > self.last_update + CONSUMPTION_INTERVAL:
@@ -198,13 +210,6 @@ class PanasonicHC:
             for code, key in MONITOR_SENSOR_CODES:
                 await asyncio.sleep(0.5)
                 await self._read_monitor(code, key)
-            # Poll the preheating/defrost status icons (0x69 sub-23). These match the official
-            # app byte-for-byte but go unanswered on the PACi NX, so they live here in the slow
-            # block rather than hammering the 10 s status loop; HVACAction falls back to the
-            # byte[2] running bit when they stay unset.
-            for code in ICON_CODES:
-                await asyncio.sleep(0.4)
-                await self._async_write_command(PanasonicBLEIconReq(code))
             self.last_update = now
 
     async def _read_monitor(self, code: int, key: str) -> None:
@@ -283,7 +288,10 @@ class PanasonicHC:
                     if len(packet.pdata) >= 2:
                         raw = int.from_bytes(packet.pdata[0:2], "big", signed=True)
                         if raw not in MONITOR_SENTINELS:
-                            value = raw / 10 if key in MONITOR_TEMP_KEYS else raw
+                            # The 0x2C RC-monitor value is the displayed reading directly:
+                            # temps are whole degrees C (not tenths) and current is as-is.
+                            # Confirmed on hardware: outdoor air raw 6 == 6 C.
+                            value = raw
                             self.monitor[key] = value
                             if key == "outdoor_temp":
                                 self.outdoor_temp = value
