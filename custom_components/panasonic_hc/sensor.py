@@ -60,8 +60,7 @@ async def async_setup_entry(
                 thermostat, "compressor_current", "Compressor Current",
                 SensorDeviceClass.CURRENT, UnitOfElectricCurrent.AMPERE,
             ),
-            # Newly added from the ECOi service-manual DN table. Scaling is best-guess pending
-            # the calibration sweep, so these values may be off by 10x until confirmed.
+            # Added from the ECOi DN table and confirmed by the calibration sweep (all x1).
             PanasonicHCMonitorSensor(
                 thermostat, "room_temp", "Room Temperature (Unit Sensor)",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
@@ -71,11 +70,12 @@ async def async_setup_entry(
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             PanasonicHCMonitorSensor(
-                thermostat, "low_pressure_temp", "Suction (Low-Pressure) Temperature",
+                thermostat, "hx_gas_temp", "Heat Exchanger Gas Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             PanasonicHCMonitorSensor(
-                thermostat, "indoor_eev", "Indoor Expansion Valve Position", None, None,
+                thermostat, "hx_liquid_temp", "Heat Exchanger Liquid Temperature",
+                SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
         ],
     )

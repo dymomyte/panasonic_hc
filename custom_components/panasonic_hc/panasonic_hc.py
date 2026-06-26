@@ -51,14 +51,19 @@ CONSUMPTION_INTERVAL = 300
 MONITOR_COMPRESSOR_CODE = 0x14  # CT2 compressor current -> "running" signal, polled often
 MONITOR_COMPRESSOR_SCALE = 1.0  # amps; raw ~3 while running == ~3 A (unconf scale)
 MONITOR_SENSOR_CODES = [
-    (0x11, "outdoor_temp", 1.0),            # Outdoor air temp TO (confirmed x1 vs backyard sensor)
-    (0x06, "outdoor_coil_temp", 0.1),       # Outdoor heat-exch temp (confirmed: -2.9 C, x0.1)
-    (0x03, "indoor_coil_temp", 1.0),        # Indoor heat-exch E1 (raw 24; x1==24 C, unconf)
-    (0x02, "room_temp", 1.0),               # Intake / return-air temp TA (x1 unconf)
-    (0x08, "indoor_eev", 1.0),              # Indoor electronic expansion valve position (step)
-    (0x0A, "outdoor_discharge_temp", 1.0),  # Outdoor discharge temp TD (manual: whole C, x1)
-    (0x1D, "low_pressure_temp", 0.1),       # Low-pressure sat. temp / suction (x0.1 unconf)
+    (0x11, "outdoor_temp", 1.0),            # Outdoor air temp TO (confirmed 7 C)
+    (0x06, "outdoor_coil_temp", 0.1),       # Outdoor coil/evap (confirmed -2.9 C; the ONLY x0.1 code)
+    (0x03, "indoor_coil_temp", 1.0),        # Indoor heat-exch E1 (confirmed 12 C, x1)
+    (0x02, "room_temp", 1.0),               # Intake / return-air temp TA (confirmed 13 C, x1)
+    (0x0A, "outdoor_discharge_temp", 1.0),  # Discharge TD (confirmed x1: 28 C idle, rises when running)
+    (0x0D, "hx_gas_temp", 1.0),             # Outdoor heat-exch gas temp (sweep-confirmed: 10 C, x1)
+    (0x0E, "hx_liquid_temp", 1.0),          # Outdoor heat-exch liquid temp (sweep-confirmed: 6 C, x1)
 ]
+# Dropped after the sweep: 0x08 (indoor EEV) and 0x1D (suction/LP-sat) return no data on this
+# PACi single-split. The indoor temp codes 0x02-0x05 DO answer at the outdoor address, so the
+# routing is correct -- EEV/suction simply aren't exposed over BLE here. All temps are x1 except
+# 0x06 (the lone tenths field). The DEBUG sweep below still probes the full range for future
+# exploration (e.g. 0x15 reads ~480, a possible outdoor expansion-valve step -- unconfirmed).
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
 
 # Read-only calibration sweep: when DEBUG logging is enabled, probe this documented code range
