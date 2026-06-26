@@ -6,6 +6,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, Sen
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     EntityCategory,
+    UnitOfElectricCurrent,
     UnitOfEnergy,
     UnitOfTemperature,
 )
@@ -56,7 +57,8 @@ async def async_setup_entry(
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             PanasonicHCMonitorSensor(
-                thermostat, "compressor_current", "Compressor Current", None, None,
+                thermostat, "compressor_current", "Compressor Current",
+                SensorDeviceClass.CURRENT, UnitOfElectricCurrent.AMPERE,
             ),
         ],
     )
