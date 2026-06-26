@@ -77,6 +77,11 @@ async def async_setup_entry(
                 thermostat, "hx_liquid_temp", "Heat Exchanger Liquid Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
+            # Experimental: code 0x15 (~480 at idle). Likely the outdoor expansion-valve step;
+            # confirm it tracks compressor load before trusting the label. No device class/unit.
+            PanasonicHCMonitorSensor(
+                thermostat, "outdoor_eev", "Outdoor Expansion Valve (experimental)", None, None,
+            ),
         ],
     )
 

@@ -58,6 +58,9 @@ MONITOR_SENSOR_CODES = [
     (0x0A, "outdoor_discharge_temp", 1.0),  # Discharge TD (confirmed x1: 28 C idle, rises when running)
     (0x0D, "hx_gas_temp", 1.0),             # Outdoor heat-exch gas temp (sweep-confirmed: 10 C, x1)
     (0x0E, "hx_liquid_temp", 1.0),          # Outdoor heat-exch liquid temp (sweep-confirmed: 6 C, x1)
+    (0x15, "outdoor_eev", 1.0),             # EXPERIMENTAL: sweep read ~480 (idle) -- candidate for
+                                            # the outdoor expansion-valve (MOV) step (0-480 pulses).
+                                            # Keep only if it tracks compressor load; else drop.
 ]
 # Dropped after the sweep: 0x08 (indoor EEV) and 0x1D (suction/LP-sat) return no data on this
 # PACi single-split. The indoor temp codes 0x02-0x05 DO answer at the outdoor address, so the
