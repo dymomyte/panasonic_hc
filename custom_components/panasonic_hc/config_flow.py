@@ -1,16 +1,32 @@
 """Config flow for Panasonic H&C."""
 
+from __future__ import annotations
+
 import logging
 from typing import Any
 
 from habluetooth import BluetoothServiceInfoBleak
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_MAC
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 from homeassistant.helpers.device_registry import format_mac
 
-from .const import DOMAIN, MODEL
+from .const import (
+    CONF_LONG_POLL_INTERVAL,
+    CONF_SHORT_POLL_INTERVAL,
+    DEFAULT_LONG_POLL_INTERVAL,
+    DEFAULT_SHORT_POLL_INTERVAL,
+    DOMAIN,
+    MODEL,
+)
 
 SCHEMA_MAC = vol.Schema({vol.Required(CONF_MAC): str})
 
@@ -24,6 +40,15 @@ class PanasonicHCConfigFlow(ConfigFlow, domain=DOMAIN):
         """Initialise config flow."""
         self.mac_address: str
         super().__init__()
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> PanasonicHCOptionsFlow:
+        """Return the options flow handler."""
+
+        return PanasonicHCOptionsFlow()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -88,6 +113,60 @@ class PanasonicHCConfigFlow(ConfigFlow, domain=DOMAIN):
             title=f"{MODEL}_{self.mac_address[-8:].replace(':','')}",
             data={},
         )
+
+
+class PanasonicHCOptionsFlow(OptionsFlow):
+    """Handle the options (poll intervals) for a Panasonic H&C entry."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Manage the poll-interval options."""
+
+        if user_input is not None:
+            # NumberSelector yields floats; store plain ints.
+            return self.async_create_entry(
+                data={
+                    CONF_SHORT_POLL_INTERVAL: int(user_input[CONF_SHORT_POLL_INTERVAL]),
+                    CONF_LONG_POLL_INTERVAL: int(user_input[CONF_LONG_POLL_INTERVAL]),
+                }
+            )
+
+        options = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_SHORT_POLL_INTERVAL,
+                    default=options.get(
+                        CONF_SHORT_POLL_INTERVAL, DEFAULT_SHORT_POLL_INTERVAL
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=5,
+                        max=600,
+                        step=1,
+                        unit_of_measurement="seconds",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+                vol.Required(
+                    CONF_LONG_POLL_INTERVAL,
+                    default=options.get(
+                        CONF_LONG_POLL_INTERVAL, DEFAULT_LONG_POLL_INTERVAL
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=30,
+                        max=3600,
+                        step=1,
+                        unit_of_measurement="seconds",
+                        mode=selector.NumberSelectorMode.BOX,
+                    )
+                ),
+            }
+        )
+
+        return self.async_show_form(step_id="init", data_schema=schema)
 
 
 def validate_mac(mac: str) -> bool:

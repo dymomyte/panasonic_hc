@@ -18,5 +18,17 @@
                 "title": "Configure new Panasonic H&C device"
             }
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "data": {
+                    "long_poll_interval": "Consumption & diagnostics poll interval (seconds)",
+                    "short_poll_interval": "Status poll interval (seconds)"
+                },
+                "description": "How often the integration polls the unit over Bluetooth.",
+                "title": "Panasonic H&C polling"
+            }
+        }
     }
 }

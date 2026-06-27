@@ -12,7 +12,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
-from .const import DOMAIN, SIGNAL_THERMOSTAT_CONNECTED, SIGNAL_THERMOSTAT_DISCONNECTED
+from .const import (
+    CONF_LONG_POLL_INTERVAL,
+    CONF_SHORT_POLL_INTERVAL,
+    DEFAULT_LONG_POLL_INTERVAL,
+    DEFAULT_SHORT_POLL_INTERVAL,
+    DOMAIN,
+    SIGNAL_THERMOSTAT_CONNECTED,
+    SIGNAL_THERMOSTAT_DISCONNECTED,
+)
 from .panasonic_hc import PanasonicHC, PanasonicHCException
 
 PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.SWITCH]
@@ -34,7 +42,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if device is None:
         raise ConfigEntryNotReady(f"[{mac_address}] Device could not be found")
 
-    thermostat = PanasonicHC(ble_device=device, mac_address=mac_address)
+    short_interval = int(
+        entry.options.get(CONF_SHORT_POLL_INTERVAL, DEFAULT_SHORT_POLL_INTERVAL)
+    )
+    long_interval = int(
+        entry.options.get(CONF_LONG_POLL_INTERVAL, DEFAULT_LONG_POLL_INTERVAL)
+    )
+
+    thermostat = PanasonicHC(
+        ble_device=device,
+        mac_address=mac_address,
+        short_interval=short_interval,
+        long_interval=long_interval,
+    )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = thermostat
 
@@ -91,7 +111,7 @@ async def _async_run_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None
                 "[%s] Error updating PanasonicHC device %s", thermostat.mac_address, e
             )
 
-        await asyncio.sleep(10)
+        await asyncio.sleep(thermostat.short_interval)
 
 
 async def _async_reconnect_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None:

@@ -18,5 +18,17 @@
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Panasonic H&C polling",
+        "description": "How often the integration polls the unit over Bluetooth.",
+        "data": {
+          "short_poll_interval": "Status poll interval (seconds)",
+          "long_poll_interval": "Consumption & diagnostics poll interval (seconds)"
+        }
+      }
+    }
   }
 }

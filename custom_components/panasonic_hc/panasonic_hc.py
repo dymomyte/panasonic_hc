@@ -10,6 +10,7 @@ from bleak.backends.characteristic import BleakGATTCharacteristic
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
 
+from .const import DEFAULT_LONG_POLL_INTERVAL, DEFAULT_SHORT_POLL_INTERVAL
 from .panasonic_hc_proto import (
     FANSPEED,
     MODE,
@@ -33,7 +34,6 @@ MAX_TEMP = 32  # FIXME: check these
 
 BLE_CHAR_WRITE = "4d200002-eff3-4362-b090-a04cab3f1da0"
 BLE_CHAR_NOTIFY = "4d200003-eff3-4362-b090-a04cab3f1da0"
-CONSUMPTION_INTERVAL = 300
 
 # Service-monitor "data number" (DN) codes read via field 0x2C to the OUTDOOR unit, from the
 # Remote Controller Servicing Functions table (ECOi/PACi service manual). The unit returns
@@ -141,10 +141,22 @@ class Status:
 class PanasonicHC:
     """Class representing the Panasonic Controller."""
 
-    def __init__(self, ble_device: BLEDevice, mac_address: str) -> None:
+    def __init__(
+        self,
+        ble_device: BLEDevice,
+        mac_address: str,
+        short_interval: int = DEFAULT_SHORT_POLL_INTERVAL,
+        long_interval: int = DEFAULT_LONG_POLL_INTERVAL,
+    ) -> None:
         """Initialise Panasonic H&C Controller."""
 
         self.last_update = 0
+        # Poll cadences (seconds). short_interval is consumed by the HA poll loop in
+        # __init__.py; long_interval gates the consumption/diagnostics block in
+        # async_get_status. Both default to the const fallbacks and are normally driven by
+        # the entry options.
+        self.short_interval = short_interval
+        self.long_interval = long_interval
         self.device = ble_device
         self.mac_address = mac_address
         self._on_update_callbacks: list[Callable] = []
@@ -223,7 +235,7 @@ class PanasonicHC:
 
         # update consumption + slower diagnostics if interval has passed
         now = time.time()
-        if now > self.last_update + CONSUMPTION_INTERVAL:
+        if now > self.last_update + self.long_interval:
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEPowerReq())
             await asyncio.sleep(0.5)
