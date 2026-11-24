@@ -45,8 +45,9 @@ def _encode(data):
     return bytes(data)
 
 
-def _bytes_to_floats(data):
-    arr = [data[x] << 8 + data[x + 1] for x in range(0, len(data), 2)]
+# A field whose length byte is one of these carries no value: the unit is answering "this
+# item is not supported" or "rejected / busy, ask again" (the app re-sends the latter).
+FIELD_MARKERS = {0xFE: "not supported", 0xFF: "rejected"}
 
 
 class MODE(Enum):
@@ -78,6 +79,10 @@ class PanasonicBLEParcel:
             SET_MODE = 66
             SET_POWERSAVE = 84
 
+        # Set when the unit answered the field with a marker instead of a value: see
+        # FIELD_MARKERS. A marked field has no data and must never be decoded as one.
+        marker = None
+
         def __init__(self, ptype, pdata):
             self.ptype = ptype
             self.pdata = pdata
@@ -88,19 +93,34 @@ class PanasonicBLEParcel:
 
             ptype = fd.read(1)[0]
             plen = fd.read(1)[0]
+            if plen in FIELD_MARKERS:
+                # 0xFE / 0xFF in the length byte are not lengths: no value bytes follow and
+                # the next field starts straight away. Reading 254/255 "value" bytes here
+                # used to swallow the rest of the frame, and a lone marked field decoded its
+                # checksum byte as data (a 0x27 marker read as "A00 / no fault").
+                packet = PanasonicBLEParcel.PanasonicBLEPacket(ptype, b"")
+                packet.marker = FIELD_MARKERS[plen]
+                return packet
             pdata = fd.read(plen)
 
-            if ptype == 129:
-                return PanasonicBLEParcel.PanasonicBLEPacketStatus(ptype, pdata)
-            if ptype == 33:
-                return PanasonicBLEParcel.PanasonicBLEPacketOutdoorTemp(ptype, pdata)
+            # A field shorter than its decoder expects must not take the rest of the parcel
+            # down with it: fall back to the undecoded packet, which every handler ignores.
+            try:
+                if ptype == 129:
+                    return PanasonicBLEParcel.PanasonicBLEPacketStatus(ptype, pdata)
+                if ptype == 33:
+                    return PanasonicBLEParcel.PanasonicBLEPacketOutdoorTemp(ptype, pdata)
 
-            if ptype == 105 and pdata[0:3] == bytes([2, 0, 19]):
-                return PanasonicBLEParcel.PanasonicBLEPacketConsumption(ptype, pdata)
-            if ptype == 39:
-                return PanasonicBLEParcel.PanasonicBLEPacketError(ptype, pdata)
-            if ptype == 92 and plen >= 2:
-                return PanasonicBLEParcel.PanasonicBLEPacketNanoe(ptype, pdata)
+                if ptype == 105 and pdata[0:3] == bytes([2, 0, 19]):
+                    return PanasonicBLEParcel.PanasonicBLEPacketConsumption(ptype, pdata)
+                if ptype == 39:
+                    return PanasonicBLEParcel.PanasonicBLEPacketError(ptype, pdata)
+                if ptype == 92 and plen >= 2:
+                    return PanasonicBLEParcel.PanasonicBLEPacketNanoe(ptype, pdata)
+            except (IndexError, ValueError) as e:
+                _LOGGER.debug(
+                    "Undecodable field 0x%02x [%s]: %s", ptype, pdata.hex(" "), e
+                )
 
             return PanasonicBLEParcel.PanasonicBLEPacket(ptype, pdata)
 
@@ -108,31 +128,44 @@ class PanasonicBLEParcel:
             return self.ptype.to_bytes() + len(self.pdata).to_bytes() + self.pdata
 
         def __str__(self):
+            if self.marker:
+                return f"{self.ptype}, <{self.marker}>"
             return f"{self.ptype}, {list(self.pdata)}"
 
     class PanasonicBLEPacketStatus(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
             super().__init__(ptype, pdata)
-            self.curtemp = 0
+            self.curtemp = None
             self.power = self.pdata[0] & 1
-            # The unit reports 6 (auto_cool) while in auto mode; map it to auto (5).
-            m = (self.pdata[0] >> 5) & 7
-            self.mode = MODE(5 if m == 6 else m)
+            # Raw operation-mode nibble: 1 heat, 2 cool, 3 fan, 4 dry, 5 auto(-heat),
+            # 6 auto-cool. These are also the 0x4C profile selectors, so the raw value is kept
+            # for writes. Both auto values map to MODE.auto; a value outside the table (0, 7)
+            # decodes to None so the caller can keep the last known mode instead of the whole
+            # status frame being thrown away.
+            self.mode_code = (self.pdata[0] >> 5) & 7
+            m = 5 if self.mode_code == 6 else self.mode_code
+            self.mode = MODE(m) if m in MODE._value2member_map_ else None
             self.temp = (self.pdata[4] - 70) / 2
-            self.fanspeed = FANSPEED((self.pdata[1] >> 5) & 7)
-            self.powersave = self.pdata[8]
+            f = (self.pdata[1] >> 5) & 7
+            self.fanspeed = FANSPEED(f) if f in FANSPEED._value2member_map_ else None
+            # byte[8] bit 0 is the energy-saving flag. The other bits are unrelated (the app
+            # reads bits 6-7 as the ECONAVI state), so the byte must not be tested whole.
+            self.powersave = self.pdata[8] & 0x01 if len(self.pdata) > 8 else 0
             # byte[3] is the operation-PROHIBITED / RC-lock bitmask (which functions are
-            # locked/restricted: bit0 start-stop, bit1 mode, bit2 set-temp, bit3 fan,
-            # bit4 flap, bit5 energy-saving). In the official app it drives the
-            # "layout_prohibited" lock overlay - it is NOT a "running/idle" bit (it stays 0
-            # while heating). There is no reliable compressor-running bit in this frame, so
-            # HVACAction is derived from current-vs-target temperature, not from here.
+            # locked/restricted: bit0 start-stop, bit1 mode, bit2 set-temp, bit3 flap,
+            # bit4 fan speed, bit5 energy-saving). In the official app it drives the
+            # "layout_prohibited" lock overlay.
             self.prohibited = bool(self.pdata[3]) if len(self.pdata) > 3 else False
-            # byte[2] bit 0x02 is the thermo/compressor state: SET (0x02) = idle/standby
-            # (the "indoor unit is stopped or slight blow operation" wall-icon), CLEAR (0x00)
-            # = actively heating/cooling. Confirmed on hardware incl. the compressor start
-            # lag. (Polarity is inverted vs the naive reading — that caused the old stuck
-            # "Heating".) None when the byte isn't present.
+            # byte[2] bit 0x02 is the wall controller's standby icon, "the indoor unit is
+            # stopped or slight blow operation is in progress": SET = indoor fan held,
+            # CLEAR = fan running normally. In HEATING the fan is held whenever the
+            # compressor is off, so there it doubles as an idle flag (how it was first
+            # calibrated). In COOLING the fan keeps running while the compressor is off, so
+            # the bit stays clear and says nothing about the compressor: in 12 days of
+            # recorded history (about 43 hours of cooling, in four sessions) it never set,
+            # though the compressor was stopped 75% of that cooling time. The official app does not read this bit at all. It is therefore only a
+            # fallback for the running state -- see PanasonicHC.compressor_running. None
+            # when the byte isn't present.
             self.running = (self.pdata[2] & 0x02) == 0 if len(self.pdata) > 2 else None
 
             if len(self.pdata) >= 6:
@@ -141,11 +174,11 @@ class PanasonicBLEParcel:
         def __str__(self):
             s = super().__str__()
             s += f"\nTemp: {self.temp}"
-            if self.curtemp:
+            if self.curtemp is not None:
                 s += f" ({self.curtemp})"
             s += f'\nPower: { "on" if self.power else "off" }'
-            s += f"\nMode: {self.mode.name}"
-            s += f"\nFan: {self.fanspeed.name}"
+            s += f"\nMode: {self.mode.name if self.mode else self.mode_code}"
+            s += f"\nFan: {self.fanspeed.name if self.fanspeed else '?'}"
             s += f'\nPowersave: { "on" if self.powersave else "off" }'
             return s
 
@@ -156,8 +189,14 @@ class PanasonicBLEParcel:
             # (decode confirmed from the decompiled SensorTempParser). The device reports
             # several sensors distinguished by a sub-index the wire layout here doesn't
             # expose; raw 0x7FFF / -0x8000 are the "no data" sentinels (9999 / 10000).
-            # NOTE: which sensor this is (outdoor vs coil vs room) is unconfirmed for this
-            # firmware and may need a hardware capture to pin down.
+            # NOTE: apart from the DEBUG-only capability probe, whose replies are logged and
+            # not applied, nothing requests this field; the Outdoor Temperature entity is fed
+            # by monitor code 0x11 (a 0x21 field arriving unasked would also update it). The
+            # app reads channel 0x20
+            # from the outdoor unit for its main-screen outdoor temperature; the reply does
+            # not say which channel it answers.
+            if len(pdata) < 2:
+                raise ValueError("short 0x21 field")
             raw = int.from_bytes(pdata[0:2], "big", signed=True)
             self.temp = None if raw in (0x7FFF, -0x8000) else raw / 10
 
@@ -169,17 +208,24 @@ class PanasonicBLEParcel:
     class PanasonicBLEPacketError(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
             super().__init__(ptype, pdata)
-            # Field 0x27 (39) alert-history entry: pdata[0..1] = indoor-unit identity word,
-            # pdata[2] = error code byte. Decode per the decompiled ErrorCode class:
-            # letter = "ACEFHJLP"[(b>>5)&7], number = b & 0x1F. "A00" means no fault.
-            code = pdata[2] if len(pdata) > 2 else 0
+            # Field 0x27 (39) alert-HISTORY entry (the app's "Service check" list, which
+            # keeps an alarm until the history is cleared -- it is not a live fault flag):
+            # pdata[0..1] = identity word of the unit that raised it, pdata[2] = error code
+            # byte. Decode per the decompiled ErrorCode class: letter = "ACEFHJLP"[(b>>5)&7],
+            # number = b & 0x1F. "A00" means no entry.
+            if len(pdata) < 3:
+                raise ValueError("short 0x27 field")
+            code = pdata[2]
             self.error = f"{'ACEFHJLP'[(code >> 5) & 7]}{code & 0x1F:02d}"
 
     class PanasonicBLEPacketNanoe(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
             super().__init__(ptype, pdata)
             # Field 0x5C (92): byte[1] bit0 = nanoeX on, bit2 = internal cleaning on
-            # (decompiled NanoeXSettingsInteractor).
+            # (decompiled NanoeXSettingsInteractor). Only when byte[0] is 0: with byte[0] = 1
+            # the same field carries the nanoeX generator health code instead.
+            if pdata[0] != 0:
+                raise ValueError("0x5C field is not an on/off state")
             self.nanoe = bool(pdata[1] & 1)
 
     class PanasonicBLEPacketConsumption(PanasonicBLEPacket):
@@ -430,15 +476,41 @@ class PanasonicBLEPowerReqHour(PanasonicBLEParcel):
 
 
 class PanasonicBLETemp(PanasonicBLEParcel):
-    def __init__(self, temp):
+    def __init__(self, temp, mode_nibble=None):
+        # 0x4C with the 0x08 "setpoint present" flag; the low nibble selects WHICH mode's
+        # stored setpoint is written (1 heat, 2 cool, 4 dry, 5 auto/auto-heat, 6 auto-cool).
+        # Heat and cool are always written, as before. If the unit is currently in another
+        # mode that has a setpoint (dry / auto), pass its nibble so that profile is written
+        # too -- otherwise the change does not apply to the mode actually running.
         temp = int(temp * 2 + 70)
+        nibbles = [1, 2]
+        if mode_nibble in (4, 5, 6):
+            nibbles.append(mode_nibble)
         super().__init__(
             src="APP",
             dst="I_UNIT1",
             op="SET",
             packets=[
-                PanasonicBLEParcel.PanasonicBLEPacket(76, bytes([9, 0, temp, 0])),
-                PanasonicBLEParcel.PanasonicBLEPacket(76, bytes([10, 0, temp, 0]))
+                PanasonicBLEParcel.PanasonicBLEPacket(76, bytes([0x08 | n, 0, temp, 0]))
+                for n in nibbles
+            ],
+        )
+
+
+class PanasonicBLEReadReq(PanasonicBLEParcel):
+    """Read (REQ) one or more fields from one address.
+
+    Used by the DEBUG-only capability probe. The operation is fixed to REQ, so this class
+    cannot build a write whatever it is given."""
+
+    def __init__(self, dst, fields):
+        super().__init__(
+            src="APP",
+            dst=dst,
+            op="REQ",
+            packets=[
+                PanasonicBLEParcel.PanasonicBLEPacket(fid, bytes(value))
+                for fid, value in fields
             ],
         )
 

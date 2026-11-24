@@ -160,13 +160,16 @@ class PanasonicHCClimate(ClimateEntity):
     def _get_current_hvac_action(self) -> HVACAction:
         """Derive the current HVAC action.
 
-        Primary running signal is status byte[2] (status.running): clear ⇒ compressor
-        actively heating/cooling, set ⇒ idle/standby ("slight blow"). The idle bit takes
+        The running signal is the measured compressor current (thermostat.compressor_running):
+        above zero ⇒ actively heating/cooling, zero ⇒ idle. Status byte[2] (status.running) is
+        only the fallback for a unit that does not report the current: it is the "indoor fan
+        held" standby flag, which follows the compressor in heating but did not set in about
+        43 hours of recorded cooling, where it left the action stuck on "cooling" with the
+        compressor stopped. Idle takes
         precedence over the preheating icon, because the unit keeps HEAT_PREPARING/OP_PREPARING
         lit while merely parked in heat mode — so a preparing icon only means a genuine warm-up
         when the compressor is actually running. Defrost (0x69 sub-23) stays on top since it
-        runs the compressor. Falls back to a current-vs-target estimate only if byte[2] is
-        unavailable.
+        runs the compressor. With neither signal it falls back to a current-vs-target estimate.
         """
 
         st = self._thermostat.status
@@ -181,7 +184,9 @@ class PanasonicHCClimate(ClimateEntity):
         if self._thermostat.defrosting:
             return HVACAction.DEFROSTING
 
-        running = st.running
+        running = self._thermostat.compressor_running
+        if running is None:
+            running = st.running
         if running is None:
             # No running bit available — fall back to temperature demand.
             cur, target = st.curtemp, st.settemp
@@ -241,6 +246,25 @@ class PanasonicHCClimate(ClimateEntity):
                 await self._thermostat.async_set_mode(hvac_mode.value)
         except PanasonicHCException:
             _LOGGER.error("[%s] Failed setting HVAC mode", self._thermostat.mac_address)
+
+    async def async_turn_on(self) -> None:
+        """Power the unit on in whatever mode it was last in.
+
+        Without this, Home Assistant falls back to setting the first supported heat/cool
+        mode, which would force HEAT regardless of the unit's own mode."""
+
+        try:
+            await self._thermostat.async_set_power(True)
+        except PanasonicHCException:
+            _LOGGER.error("[%s] Failed turning on", self._thermostat.mac_address)
+
+    async def async_turn_off(self) -> None:
+        """Power the unit off."""
+
+        try:
+            await self._thermostat.async_set_power(False)
+        except PanasonicHCException:
+            _LOGGER.error("[%s] Failed turning off", self._thermostat.mac_address)
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         """Set new preset mode."""

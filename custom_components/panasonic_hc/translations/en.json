@@ -3,6 +3,9 @@
         "abort": {
             "already_configured": "Device is already configured"
         },
+        "error": {
+            "invalid_mac_address": "Enter a MAC address as six hexadecimal pairs separated by colons, for example AA:BB:CC:DD:EE:FF."
+        },
         "flow_title": "Panasonic H&C Control [{mac}]",
         "step": {
             "confirm": {

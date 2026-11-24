@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from habluetooth import BluetoothServiceInfoBleak
@@ -172,9 +173,4 @@ class PanasonicHCOptionsFlow(OptionsFlow):
 def validate_mac(mac: str) -> bool:
     """Return whether or not given value is a valid MAC address."""
 
-    return bool(
-        mac
-        and len(mac) == 17
-        and mac.count(":") == 5
-        and all(int(part, 16) < 256 for part in mac.split(":") if part)
-    )
+    return bool(mac and re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac))

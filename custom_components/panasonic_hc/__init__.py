@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import logging
 
 from homeassistant.components import bluetooth
@@ -24,6 +25,9 @@ from .const import (
 from .panasonic_hc import PanasonicHC, PanasonicHCException
 
 PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.SWITCH]
+
+# hass.data key: entry_id -> the entry's poll task, so unload can stop it before disconnecting.
+DATA_POLL_TASKS = f"{DOMAIN}_poll_tasks"
 
 type PanasonicHCConfigEntry = ConfigEntry[PanasonicHC]  # noqa: F821
 
@@ -54,6 +58,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         mac_address=mac_address,
         short_interval=short_interval,
         long_interval=long_interval,
+        # Re-resolved on every (re)connect: the controller may now be reachable through a
+        # different adapter or Bluetooth proxy than the one that saw it at setup.
+        ble_device_callback=partial(
+            bluetooth.async_ble_device_from_address,
+            hass,
+            mac_address.upper(),
+            connectable=True,
+        ),
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = thermostat
@@ -62,8 +74,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    entry.async_create_background_task(
-        hass, _async_run_thermostat(hass, entry), entry.entry_id
+    hass.data.setdefault(DATA_POLL_TASKS, {})[entry.entry_id] = (
+        entry.async_create_background_task(
+            hass, _async_run_thermostat(hass, thermostat), entry.entry_id
+        )
     )
 
     return True
@@ -80,17 +94,26 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if unload_ok := await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
         thermostat: PanasonicHC = hass.data[DOMAIN].pop(entry.entry_id)
-        await thermostat.async_disconnect()
+        # Stop the poll/reconnect loop first so it cannot race the disconnect (or try to
+        # reconnect behind it), then close the link. A failed disconnect must not fail the
+        # unload: the platforms are already gone and the entry would be left stuck.
+        if task := hass.data.get(DATA_POLL_TASKS, {}).pop(entry.entry_id, None):
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        try:
+            await thermostat.async_disconnect()
+        except PanasonicHCException as e:
+            _LOGGER.warning(
+                "[%s] Error disconnecting from device: %s", thermostat.mac_address, e
+            )
 
     return unload_ok
 
 
-async def _async_run_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_run_thermostat(hass: HomeAssistant, thermostat: PanasonicHC) -> None:
     """Run the thermostat."""
 
-    thermostat = hass.data[DOMAIN][entry.entry_id]
-
-    await _async_reconnect_thermostat(hass, entry)
+    await _async_reconnect_thermostat(hass, thermostat)
 
     while True:
         try:
@@ -104,7 +127,7 @@ async def _async_run_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None
                 async_dispatcher_send(
                     hass, f"{SIGNAL_THERMOSTAT_DISCONNECTED}_{thermostat.mac_address}"
                 )
-                await _async_reconnect_thermostat(hass, entry)
+                await _async_reconnect_thermostat(hass, thermostat)
                 continue
 
             _LOGGER.error(
@@ -114,10 +137,10 @@ async def _async_run_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None
         await asyncio.sleep(thermostat.short_interval)
 
 
-async def _async_reconnect_thermostat(hass: HomeAssistant, entry: ConfigEntry) -> None:
+async def _async_reconnect_thermostat(
+    hass: HomeAssistant, thermostat: PanasonicHC
+) -> None:
     """Reconnect thermostat."""
-
-    thermostat = hass.data[DOMAIN][entry.entry_id]
 
     while True:
         try:

@@ -15,6 +15,9 @@
         "description": "[%key:common::config_flow::description::confirm_setup%]"
       }
     },
+    "error": {
+      "invalid_mac_address": "Enter a MAC address as six hexadecimal pairs separated by colons, for example AA:BB:CC:DD:EE:FF."
+    },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
     }
