@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+import datetime
 import logging
 import time
 
@@ -28,10 +29,13 @@ from .panasonic_hc_proto import (
     PanasonicBLEReadReq,
     PanasonicBLEStatusReq,
     PanasonicBLETemp,
+    alarm_code,
+    setpoint_temp,
 )
 
+# Setpoint range used until the unit's own per-mode limits have been read (READS_ONCE).
 MIN_TEMP = 16
-MAX_TEMP = 32  # FIXME: check these
+MAX_TEMP = 32
 
 # Room ("current") temperature sanity filter. Some 0x81 frames don't carry the room
 # temperature at byte 5, and there is no known way to tell them apart, so a reading is only
@@ -114,8 +118,9 @@ MONITOR_DRAIN_TIME = 2.0
 MONITOR_MAX_MISSES = 2  # consecutive unanswered reads before abandoning the cycle's block
 
 # Read-only capability probe, sent once per connection and ONLY when DEBUG logging is on. It
-# asks for everything the official app reads that this integration does not use yet, so one
-# debug capture shows which of them this unit answers ("probe -> ..." lines, each followed by
+# asks for what the official app reads beyond the integration's original set (some are now
+# regular reads, see READS_LONG), so one debug capture shows which of them a unit answers
+# ("probe -> ..." lines, each followed by
 # the raw "BLE frame" reply). Every field is a REQ built exactly as the app builds it, grouped
 # into frames the way the app groups them (the icons are split into smaller frames); replies
 # are logged and never applied to state. A few come from the app's Maintenance screens, which
@@ -167,6 +172,38 @@ PROBE_READS = [
     ],
 ]
 PROBE_SPACING = 2.0  # seconds between probe requests, so each reply follows its own request
+
+# Reads the app makes that this unit answered to the probe (24 Nov 2026): (destination,
+# [(field, request bytes)]). Each field's bytes are what the app sends; the monthly-ring frame
+# groups idx 18 with pages 19-25, where the app sends idx 18 with other headers (either way
+# the header is taken before its pages, see on_notification).
+# Safety: they go out through PanasonicBLEReadReq, which can only build REQs, and every 0x69
+# value is the read form [02 00 sub idx len]. That -- not a different field -- is what keeps
+# them clear of the requests that must never be sent: field 0x69 is shared with the
+# maintenance-mode WRITE [00 00 1b 01 x] (sub 27, like the alarm read below) and with the
+# sub-3 READ, which returns the controller's administrator password. Also never: SET 0x27 or
+# 0x4B with an empty value (clear alarm history / filter sign), 0x41 C0/80 (test run),
+# 0x61/0x62/0x64 (maintenance restart), SET 0x39 (supply voltage).
+READS_ONCE = [  # static: asked until answered (up to 3 rounds per connection), then kept
+    ("I_UNIT1", [(0x08, [0x12])]),           # model name + version word, indoor unit
+    ("O_UNIT1", [(0x08, [0x12])]),           # ... outdoor unit
+    ("BLE_MODULE_UART", [(0x08, [0x12])]),   # ... wall controller
+    ("BLE_MODULE_UART", [(_MUX, [2, 0, 24, 2, 12])]),  # setpoint limits per mode
+]
+READS_LONG = [  # with the energy + diagnostics block
+    # Monthly energy ring: header (current slot + valid mask) and all 7 pages in one frame.
+    ("BLE_MODULE_UART", [(_MUX, [2, 0, 19, idx, 12]) for idx in range(18, 26)]),
+    # The alarm the controller is showing now (idx 5) and the unit it came from (idx 6).
+    ("BLE_MODULE_UART", [(_MUX, [2, 0, 27, idx, 5]) for idx in (5, 6)]),
+    # Outdoor air temperature in 0.1 C: analog channel 0x20 of the outdoor unit.
+    ("O_UNIT1", [(0x21, [0x00, 0x20, 0x02])]),
+    # nanoeX setting (selector 0 = on/off state).
+    ("I_UNIT1", [(0x5C, [0x00, 0x02])]),
+]
+# Setpoint-limit pairs (upper, lower) in the order the controller sends them (0x69 sub-24
+# idx 2, as the app's main temperature control reads it).
+LIMIT_MODES = ("cool", "heat", "dry", "auto")
+MONTHS = 13  # slots in the monthly energy ring
 
 # Status-icon (SettingIcon mDn) codes polled via the 0x69 sub-23 query, mapped to the HVAC
 # action they represent: 9/10 = preheating/preparing, 11 = defrost.
@@ -265,10 +302,37 @@ class PanasonicHC:
         self.status = None
         self._curtemp: float | None = None  # last accepted room temperature
         self._curtemp_jump: tuple[float, int] | None = None  # (candidate, times seen)
-        self.curhour = None
-        self.curindex = None
-        self.consumption = [0] * 48
+        # Controller's hourly energy ring (0x69 sub-19), kept as read: slot -> kWh.
+        self.curhour: int | None = None  # hours of the ring day stored (newest = curhour - 1)
+        self.curindex: int | None = None  # slot of hour curhour - 1
+        self.energy_date: datetime.date | None = None  # ring day (changes at ~00:30)
+        self._energy_valid = 0  # bit n set = slot n holds data
+        self._energy_ring: list[float | None] = [None] * 48
+        self._energy_headers: set[int] = set()  # headers (idx 1, 2) since the last total
+        self._energy_pages: set[int] = set()  # pages read since the last header
+        # (controller day, today's kWh, yesterday's kWh) from the last complete ring read.
+        self.energy: tuple[datetime.date | None, float, float] | None = None
+        # Monthly ring: (current slot, this month's kWh or None while not trustworthy, last
+        # month's kWh or None). See _update_month.
+        self.energy_month: tuple[int, float | None, float | None] | None = None
+        self._month_values: list[float] | None = None
+        self._month_index: int | None = None
+        self._month_stale: tuple[int, float] | None = None  # (slot, figure) not yet replaced
+        self._month_header: tuple[int, int] | None = None  # (index, valid) awaiting pages
+        self._month_pages: dict[int, float] = {}  # slot -> kWh read since that header
         self.outdoor_temp = None
+        # Outdoor air in 0.1 C (field 0x21) and when it was last read; while fresh it is
+        # preferred over monitor code 0x11, which is the same sensor in whole degrees.
+        self._outdoor_fine_at: float | None = None
+        # The alarm the controller shows now (0x69 sub-27 idx 5; "A00" = none) and the unit
+        # address it reports with it (idx 6; 0 = none).
+        self.alarm_code: str | None = None
+        self.alarm_unit: int | None = None
+        # Static, kept once answered (not re-read on reconnect, only when the entry is set up
+        # again): component name -> (model, version word), mode name -> (min, max) setpoint.
+        self.models: dict[str, tuple[str, str]] = {}
+        self.setpoint_limits: dict[str, tuple[float, float]] = {}
+        self._once_attempts = 0  # READS_ONCE rounds sent on this connection (gives up at 3)
         self.error_code = None
         self.nanoe = None
         # Service-monitor readings (key -> value) and compressor current (diagnostic).
@@ -346,6 +410,7 @@ class PanasonicHC:
             # The capability probe (DEBUG only) waits for the diagnostics cycle after this
             # first one, so it does not hold up the entities becoming available.
             self._fast_read_result(True)
+            self._once_attempts = 0
             self._probed = True
             await self.async_get_status()
             self._probed = False
@@ -404,6 +469,10 @@ class PanasonicHC:
             await asyncio.sleep(0.5)
             await self._async_write_command(PanasonicBLEErrorReq())
             await asyncio.sleep(0.5)
+            # Before the monitor block: the 0.1 C outdoor reading must land before code 0x11.
+            for dst, fields in self._once_reads_due() + READS_LONG:
+                await self._async_write_command(PanasonicBLEReadReq(dst, fields))
+                await asyncio.sleep(0.5)
             # An unanswered read costs timeout + drain, and this runs inside the status poll,
             # so give up on the block for this cycle once the unit has clearly stopped
             # answering (outdoor unit off/busy, or a model without 0x2C) rather than waiting
@@ -452,6 +521,27 @@ class PanasonicHC:
         finally:
             self._probing = False
             _LOGGER.debug("probe finished")
+
+    def _once_reads_due(self) -> list:
+        """The READS_ONCE entries not answered yet (none after three rounds per connection,
+        so a unit that does not serve one does not get asked every cycle)."""
+
+        if self._once_attempts >= 3:
+            return []
+        due = [
+            (dst, fields)
+            for dst, fields in READS_ONCE
+            if (dst not in self.models if fields[0][0] == 0x08 else not self.setpoint_limits)
+        ]
+        if due:
+            self._once_attempts += 1
+        return due
+
+    def _outdoor_fine_fresh(self) -> bool:
+        return (
+            self._outdoor_fine_at is not None
+            and time.monotonic() - self._outdoor_fine_at <= 2 * self.long_interval + 60
+        )
 
     def _fast_read_result(self, answered: bool) -> None:
         """Schedule the next per-poll compressor read after one was answered or missed."""
@@ -538,20 +628,29 @@ class PanasonicHC:
         if self._probing:
             return  # capability probe: the reply is logged above and deliberately not applied
 
+        # An energy total needs both ring headers from the same frame: if one is rejected,
+        # the other must not be paired with a header from a different read.
+        if any(
+            isinstance(p, PanasonicBLEParcel.PanasonicBLEPacketConsumption)
+            and (p.hour is not None or p.index is not None)
+            for p in parcel
+        ):
+            self._energy_headers.clear()
         do_callback = False
         for packet in parcel:
             # Handled one by one so a bad field cannot discard the others in the same frame.
             try:
-                do_callback |= self._handle_packet(packet)
+                do_callback |= self._handle_packet(packet, parcel.src)
             except Exception as e:
                 _LOGGER.error("Error handling field 0x%02x: %s", packet.ptype, e)
 
-        _LOGGER.debug(
-            "Consumption: %s, curindex: %s, curhour: %s",
-            self.consumption,
-            self.curindex,
-            self.curhour,
-        )
+        if self._energy_headers == {1, 2} and len(self._energy_pages) == 12:
+            self._update_energy()
+        if self._month_header is not None and len(self._month_pages) == MONTHS:
+            # A header, then all 13 slots read after it (same frame or later ones).
+            header, self._month_header = self._month_header, None
+            self._update_month(*header, [self._month_pages[i] for i in range(MONTHS)])
+            do_callback = True
         if do_callback:
             for callback in self._on_update_callbacks:
                 callback()
@@ -572,8 +671,12 @@ class PanasonicHC:
         self._curtemp = cur
         return cur
 
-    def _handle_packet(self, packet: PanasonicBLEParcel.PanasonicBLEPacket) -> bool:
-        """Apply one decoded field to the device state. Returns True if state changed."""
+    def _handle_packet(
+        self,
+        packet: PanasonicBLEParcel.PanasonicBLEPacket,
+        src: PanasonicBLEParcel.COMPONENT | None = None,
+    ) -> bool:
+        """Apply one decoded field (sent by src) to the device state. True if state changed."""
 
         if isinstance(packet, PanasonicBLEParcel.PanasonicBLEPacketStatus):
             if not packet.power:
@@ -606,8 +709,15 @@ class PanasonicHC:
         elif isinstance(
             packet, PanasonicBLEParcel.PanasonicBLEPacketOutdoorTemp
         ):
-            if packet.temp is not None:
+            # Only the outdoor unit's channel 0x20 is asked for, and the reply does not say
+            # which channel it answers, so take it only from that unit.
+            if packet.temp is not None and src is PanasonicBLEParcel.COMPONENT.O_UNIT1:
                 self.outdoor_temp = packet.temp
+                self._outdoor_fine_at = time.monotonic()
+                return True
+        elif isinstance(packet, PanasonicBLEParcel.PanasonicBLEPacketModel):
+            if src is not None:
+                self.models[src.name] = (packet.name, packet.version)
                 return True
         elif isinstance(
             packet, PanasonicBLEParcel.PanasonicBLEPacketError
@@ -643,7 +753,8 @@ class PanasonicHC:
                     # Displayed value = raw * per-code scale (see MONITOR_SENSOR_CODES).
                     value = round(raw * scale, 1)
                     self.monitor[key] = value
-                    if key == "outdoor_temp":
+                    if key == "outdoor_temp" and not self._outdoor_fine_fresh():
+                        # Whole degrees (truncated): only while the 0.1 C reading is missing.
                         self.outdoor_temp = value
                     elif key == "compressor_current":
                         self.compressor_current = value
@@ -659,25 +770,135 @@ class PanasonicHC:
             self.preheating = any(self._icons.get(c) for c in ICON_PREHEATING)
             self.defrosting = bool(self._icons.get(ICON_DEFROST))
             return True
+        elif (
+            packet.ptype == 0x69
+            and len(packet.pdata) >= 5
+            and packet.pdata[0:3] == bytes([2, 0, 27])
+        ):
+            # Controller state (0x69 sub-27): idx 5 = alarm shown now, idx 6 = its unit.
+            if packet.pdata[3] == 5:
+                self.alarm_code = alarm_code(packet.pdata[4])
+                return True
+            if packet.pdata[3] == 6:
+                self.alarm_unit = packet.pdata[4]
+                return True
+        elif (
+            packet.ptype == 0x69
+            and len(packet.pdata) >= 12
+            and packet.pdata[0:4] == bytes([2, 0, 24, 2])
+        ):
+            # Setpoint limits (0x69 sub-24 idx 2): (upper, lower) per mode in LIMIT_MODES.
+            limits = {}
+            for i, mode in enumerate(LIMIT_MODES):
+                hi = setpoint_temp(packet.pdata[4 + 2 * i])
+                lo = setpoint_temp(packet.pdata[5 + 2 * i])
+                if 0 <= lo < hi <= 40:
+                    limits[mode] = (lo, hi)
+            if limits:
+                self.setpoint_limits = limits
+                return True
         elif isinstance(
             packet, PanasonicBLEParcel.PanasonicBLEPacketConsumption
         ):
+            # The headers arrive in the frame before the pages, so a total is only worked
+            # out once both headers (from one frame) and then all 12 pages are in: the slot
+            # the headers point at has then been read too (on_notification calls
+            # _update_energy).
+            if packet.month_index is not None:
+                self._month_header = (packet.month_index, packet.month_valid)
+                self._month_pages = {}
+            if packet.month_values is not None:
+                for i, value in enumerate(packet.month_values):
+                    self._month_pages[packet.month_pos + i] = value
             if packet.hour is not None:
                 self.curhour = packet.hour
+                self.energy_date = packet.date
+                self._energy_headers.add(1)
+                self._energy_pages.clear()
             if packet.index is not None:
                 self.curindex = packet.index
+                self._energy_valid = packet.valid
+                self._energy_headers.add(2)
+                self._energy_pages.clear()
             if packet.values is not None:
                 for i, value in enumerate(packet.values):
-                    offset = self.curhour + 24 - 1 - self.curindex
-                    if offset < 0:
-                        offset += 48
-                    idx = offset + packet.pos + i
-                    if idx >= 48:
-                        idx -= 48
-                    _LOGGER.debug("Writing %s to index %s", value, idx)
-                    self.consumption[idx] = value
+                    self._energy_ring[packet.pos + i] = value
+                self._energy_pages.add(packet.pos)
                 return True
         return False
+
+    def _update_energy(self) -> None:
+        """Work out today's and yesterday's totals from a complete read of the ring.
+
+        Slot curindex holds hour curhour - 1 of today, so today's hour h is in slot
+        curindex - (curhour - 1) + h and yesterday's 24 slots before that. Slots whose bit
+        is clear in the valid mask have not been written yet and are left out: after the
+        daily rollover the controller already points at hour 0 of the new day, but that
+        slot still holds the figure from two days earlier for the first hour."""
+
+        self._energy_headers.clear()
+        if self.curhour is None or self.curindex is None or None in self._energy_ring:
+            return
+        first = self.curindex - (self.curhour - 1)  # slot of hour 0 of today
+
+        def total(start: int, hours: int) -> float:
+            slots = [(start + h) % 48 for h in range(hours)]
+            return round(
+                sum((self._energy_ring[s] for s in slots if self._energy_valid >> s & 1), 0.0),
+                1,
+            )
+
+        self.energy = (self.energy_date, total(first, self.curhour), total(first - 24, 24))
+        _LOGGER.debug(
+            "Energy ring: day %s hour %s index %s valid %012x -> today %s kWh, "
+            "yesterday %s kWh; slots %s",
+            self.energy_date,
+            self.curhour,
+            self.curindex,
+            self._energy_valid,
+            self.energy[1],
+            self.energy[2],
+            self._energy_ring,
+        )
+
+    def _update_month(self, index: int, valid: int, values: list[float]) -> None:
+        """Take this month's and last month's totals from a complete read of the monthly ring.
+
+        Slot index is the current month and is a live total. A month change has not been
+        seen yet. The hourly ring marks such a slot not valid until it is written, and a clear
+        valid bit is not trusted here either. In case the controller moves to the next slot
+        with the bit still set and the figure from 13 months earlier still in it:
+          * right after the slot moves, a figure equal to what the slot held before is not
+            trusted until it changes;
+          * on the 1st of the month (controller day, from the hourly ring read just before),
+            the month so far cannot be more than that day so far, which also catches it
+            after a restart, when there is no earlier read to compare with."""
+
+        old, old_index = self._month_values, self._month_index
+        if old is not None and old_index is not None and index != old_index:
+            if values[index] > 0 and values[index] == old[index]:
+                self._month_stale = (index, values[index])
+        if (
+            self.energy is not None
+            and self.energy[0] is not None
+            and self.energy[0].day == 1
+            # A margin for an hourly read a cycle behind; real month totals here are 34-366 kWh.
+            and values[index] > self.energy[1] + 5.0
+        ):
+            self._month_stale = (index, values[index])
+        if self._month_stale is not None and self._month_stale != (index, values[index]):
+            self._month_stale = None
+        current = (
+            values[index] if valid >> index & 1 and self._month_stale is None else None
+        )
+        prev = (index - 1) % MONTHS
+        finished = values[prev] if valid >> prev & 1 else None
+        self._month_values, self._month_index = values, index
+        self.energy_month = (index, current, finished)
+        _LOGGER.debug(
+            "Monthly ring: slot %s valid %04x -> this month %s kWh, last month %s kWh; %s",
+            index, valid, current, finished, values,
+        )
 
     async def async_set_power(self, state: bool) -> None:
         """Set power state."""
@@ -720,8 +941,15 @@ class PanasonicHC:
         """Turn nanoeX on or off (applies to all indoor units)."""
 
         await self._async_write_command(PanasonicBLENanoe(state))
-        # Reflect optimistically. The state is never read back from the unit (it does not
-        # volunteer 0x5C), so after a restart the switch is unknown until it is next used.
+        # Reflect it straight away, then read it back as the app does about a second after a
+        # change (it is also read with every diagnostics cycle, see READS_LONG).
         self.nanoe = state
         for callback in self._on_update_callbacks:
             callback()
+        await asyncio.sleep(1.0)
+        try:
+            await self._async_write_command(
+                PanasonicBLEReadReq("I_UNIT1", [(0x5C, [0x00, 0x02])])
+            )
+        except PanasonicHCException as e:
+            _LOGGER.debug("nanoeX read-back not sent: %s", e)

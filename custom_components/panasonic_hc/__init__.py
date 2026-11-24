@@ -9,8 +9,10 @@ import logging
 from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .const import (
@@ -69,6 +71,41 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = thermostat
+
+    # Model names and version words reported by the units (read once per setup) go on
+    # the device page: the controller as model/sw_version, the indoor + outdoor units as
+    # hw_version. What the version words are versions of is not known.
+    applied: dict[str, tuple[str, str]] = {}
+
+    @callback
+    def _async_update_device_info() -> None:
+        models = thermostat.models
+        if not models or models == applied:
+            return
+        registry = dr.async_get(hass)
+        device = registry.async_get_device(
+            connections={(CONNECTION_BLUETOOTH, thermostat.mac_address)}
+        )
+        if device is None:
+            return
+        applied.clear()
+        applied.update(models)
+        changes = {}
+        if controller := models.get("BLE_MODULE_UART"):
+            changes["model"], changes["sw_version"] = controller
+        units = [
+            f"{models[key][0]} ({models[key][1]})"
+            for key in ("I_UNIT1", "O_UNIT1")
+            if key in models
+        ]
+        if units:
+            changes["hw_version"] = " + ".join(units)
+        registry.async_update_device(device.id, **changes)
+
+    thermostat.register_update_callback(_async_update_device_info)
+    entry.async_on_unload(
+        lambda: thermostat.unregister_update_callback(_async_update_device_info)
+    )
 
     entry.async_on_unload(entry.add_update_listener(update_listener))
 

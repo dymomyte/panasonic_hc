@@ -1,5 +1,6 @@
 """Data structures for Panasonic H&C Bluetooth controllers."""
 
+import datetime
 from enum import Enum
 import io
 import logging
@@ -48,6 +49,19 @@ def _encode(data):
 # A field whose length byte is one of these carries no value: the unit is answering "this
 # item is not supported" or "rejected / busy, ask again" (the app re-sends the latter).
 FIELD_MARKERS = {0xFE: "not supported", 0xFF: "rejected"}
+
+
+def alarm_code(b: int) -> str:
+    """Decode an alarm-code byte as the app's ErrorCode class does: letter
+    "ACEFHJLP"[bits 7-5] + number (bits 4-0). "A00" means no alarm."""
+
+    return f"{'ACEFHJLP'[(b >> 5) & 7]}{b & 0x1F:02d}"
+
+
+def setpoint_temp(b: int) -> float:
+    """Decode a setpoint/temperature byte (the 0x81 status and 0x4C encoding)."""
+
+    return (b - 70) / 2
 
 
 class MODE(Enum):
@@ -117,6 +131,8 @@ class PanasonicBLEParcel:
                     return PanasonicBLEParcel.PanasonicBLEPacketError(ptype, pdata)
                 if ptype == 92 and plen >= 2:
                     return PanasonicBLEParcel.PanasonicBLEPacketNanoe(ptype, pdata)
+                if ptype == 8:
+                    return PanasonicBLEParcel.PanasonicBLEPacketModel(ptype, pdata)
             except (IndexError, ValueError) as e:
                 _LOGGER.debug(
                     "Undecodable field 0x%02x [%s]: %s", ptype, pdata.hex(" "), e
@@ -189,12 +205,9 @@ class PanasonicBLEParcel:
             # (decode confirmed from the decompiled SensorTempParser). The device reports
             # several sensors distinguished by a sub-index the wire layout here doesn't
             # expose; raw 0x7FFF / -0x8000 are the "no data" sentinels (9999 / 10000).
-            # NOTE: apart from the DEBUG-only capability probe, whose replies are logged and
-            # not applied, nothing requests this field; the Outdoor Temperature entity is fed
-            # by monitor code 0x11 (a 0x21 field arriving unasked would also update it). The
-            # app reads channel 0x20
-            # from the outdoor unit for its main-screen outdoor temperature; the reply does
-            # not say which channel it answers.
+            # The integration reads channel 0x20 from the outdoor unit (panasonic_hc.READS_LONG),
+            # as the app does for its main-screen outdoor temperature; the reply does not say
+            # which channel it answers, so it is only accepted from that unit.
             if len(pdata) < 2:
                 raise ValueError("short 0x21 field")
             raw = int.from_bytes(pdata[0:2], "big", signed=True)
@@ -215,8 +228,7 @@ class PanasonicBLEParcel:
             # number = b & 0x1F. "A00" means no entry.
             if len(pdata) < 3:
                 raise ValueError("short 0x27 field")
-            code = pdata[2]
-            self.error = f"{'ACEFHJLP'[(code >> 5) & 7]}{code & 0x1F:02d}"
+            self.error = alarm_code(pdata[2])
 
     class PanasonicBLEPacketNanoe(PanasonicBLEPacket):
         def __init__(self, ptype, pdata):
@@ -228,24 +240,97 @@ class PanasonicBLEParcel:
                 raise ValueError("0x5C field is not an on/off state")
             self.nanoe = bool(pdata[1] & 1)
 
+    class PanasonicBLEPacketModel(PanasonicBLEPacket):
+        """Field 0x08: model name (16 ASCII bytes, space padded) + a 16-bit version word.
+
+        The app keeps the name up to the first space or NUL and formats the word as
+        "%d.%02d" (0x0145 -> "3.25"); it never says what the version is of."""
+
+        def __init__(self, ptype, pdata):
+            super().__init__(ptype, pdata)
+            if len(pdata) < 18:
+                raise ValueError("short 0x08 field")
+            name = bytes(pdata[0:16])
+            for stop in (b"\x00", b" "):
+                name = name.split(stop, 1)[0]
+            self.name = name.decode("ascii", "replace")
+            word = (pdata[16] << 8) | pdata[17]
+            self.version = f"{word // 100}.{word % 100:02d}"
+
     class PanasonicBLEPacketConsumption(PanasonicBLEPacket):
+        """Field 0x69 sub-19: the controller's hourly energy ring, 48 slots (two days).
+
+        idx 1: pdata[8] = number of hours of the ring day stored; the newest, hour
+               pdata[8] - 1, is in the idx-2 slot. It is not the clock hour: it moves on when
+               an hour's figure is stored, at about :30 on the controller's clock.
+               pdata[9], [10], [11] = day, month, year - 2000 of the ring day, which changes
+               at about 00:30 when the old day's last hour is stored.
+        idx 2: pdata[5:11] = 48-bit mask, bit n set = slot n holds data; pdata[11] = slot of
+               hour pdata[8] - 1 (normally the newest stored hour). At the day change it
+               moves on two slots: the first gets the old day's hour 23, and the second (the
+               new day's hour 0) keeps its bit clear until that hour is stored about an hour
+               later (seen 25 Nov 2026: index 28 -> 30, hour 23 -> 1, bit 30 clear from
+               the day change until the hour after).
+        idx 3-14: four big-endian 16-bit values (0.1 kWh) for slots (idx - 3) * 4 onwards.
+
+        The same sub-field also carries a 13-slot ring of monthly totals (decompiled
+        ConsumptionMonitorStateApplier; matched to the kWh in Home Assistant, Apr-Oct 2026):
+        idx 18: pdata[11] = slot of the current month (a live total); pdata[9:11] =
+                13-bit mask, bit n set = slot n holds data.
+        idx 19-25: two big-endian unsigned 32-bit values (0.1 kWh) for slots (idx - 19) * 2
+                and + 1 (idx 25's second value would be slot 13, which does not exist).
+        """
+
         def __init__(self, ptype, pdata):
             self.hour = None
+            self.date = None
             self.index = None
+            self.valid = None
             self.pos = None
             self.values = None
+            self.month_index = None
+            self.month_valid = None
+            self.month_pos = None
+            self.month_values = None
 
             super().__init__(ptype, pdata)
+            if pdata[3] in (1, 2, 18) and len(pdata) < 12:
+                raise ValueError("energy ring header too short")
+            if pdata[3] == 18:
+                if pdata[11] >= 13:
+                    raise ValueError(f"monthly ring index {pdata[11]} out of range")
+                self.month_valid = int.from_bytes(pdata[9:11], "big") & 0x1FFF
+                self.month_index = pdata[11]
+            elif 19 <= pdata[3] <= 25:
+                if len(pdata) < 12:
+                    raise ValueError("monthly ring page too short")
+                self.month_pos = (pdata[3] - 19) * 2
+                self.month_values = [
+                    int.from_bytes(pdata[x : x + 4], "big") / 10
+                    for x in (4, 8)
+                    if self.month_pos + (x - 4) // 4 < 13
+                ]
             if pdata[3] == 1:
+                if pdata[8] > 23:
+                    raise ValueError(f"energy ring hour {pdata[8]} out of range")
                 self.hour = pdata[8]
+                try:
+                    self.date = datetime.date(2000 + pdata[11], pdata[10], pdata[9])
+                except ValueError:
+                    self.date = None  # clock not set: days can't be told apart
             elif pdata[3] == 2:
+                if pdata[11] >= 48:
+                    raise ValueError(f"energy ring index {pdata[11]} out of range")
+                self.valid = int.from_bytes(pdata[5:11], "big")
                 self.index = pdata[11]
             elif pdata[3] >= 3 and pdata[3] <= 14:
                 # convert remaining data to two-byte floats
                 self.pos = (pdata[3] - 3) * 4
+                if len(pdata) < 12:
+                    raise ValueError("energy ring page too short")
                 self.values = [
                     ((pdata[x + 4] << 8) + (pdata[x + 5] & 255)) / 10
-                    for x in range(0, len(pdata) - 4, 2)
+                    for x in range(0, 8, 2)
                 ]
 
     class COMPONENT(Enum):
@@ -500,7 +585,8 @@ class PanasonicBLETemp(PanasonicBLEParcel):
 class PanasonicBLEReadReq(PanasonicBLEParcel):
     """Read (REQ) one or more fields from one address.
 
-    Used by the DEBUG-only capability probe. The operation is fixed to REQ, so this class
+    Used for panasonic_hc.READS_ONCE / READS_LONG, the nanoeX read-back after a set and the
+    DEBUG-only capability probe (PROBE_READS). The operation is fixed to REQ, so this class
     cannot build a write whatever it is given."""
 
     def __init__(self, dst, fields):

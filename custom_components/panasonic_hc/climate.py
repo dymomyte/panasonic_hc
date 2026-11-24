@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from homeassistant.components.climate import (
+    ATTR_HVAC_MODE,
     FAN_AUTO,
     FAN_HIGH,
     FAN_LOW,
@@ -62,7 +63,8 @@ class PanasonicHCClimate(ClimateEntity):
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.FAN_MODE
     )
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    # native_* names: Home Assistant 2026.11 deprecated the plain ones (removed in 2027.11).
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_min_temp = MIN_TEMP
     _attr_max_temp = MAX_TEMP
     _attr_precision = PRECISION_HALVES
@@ -150,12 +152,30 @@ class PanasonicHCClimate(ClimateEntity):
             else HVACMode.OFF
         )
         self._attr_fan_mode = self._thermostat.status.fanspeed
-        self._attr_current_temperature = self._thermostat.status.curtemp
-        self._attr_target_temperature = self._thermostat.status.settemp
+        self._attr_native_current_temperature = self._thermostat.status.curtemp
+        self._attr_native_target_temperature = self._thermostat.status.settemp
+        self._attr_min_temp, self._attr_max_temp = self._setpoint_range(
+            self._thermostat.status.mode
+        )
         self._attr_preset_mode = (
             PRESET_ECO if self._thermostat.status.powersave else PRESET_NONE
         )
         self._attr_hvac_action = self._get_current_hvac_action()
+
+    def _setpoint_range(self, mode: str | None) -> tuple[float, float]:
+        """The unit's own setpoint range for mode (read from the controller; on this unit
+        cool/dry 18-30, heat 16-30, auto 17-27 C). Fan-only has none, so it gets the widest
+        range; before the limits are read, the fixed MIN_TEMP-MAX_TEMP."""
+
+        limits = self._thermostat.setpoint_limits
+        if mode in limits:
+            return limits[mode]
+        if limits:
+            return (
+                min(lo for lo, _ in limits.values()),
+                max(hi for _, hi in limits.values()),
+            )
+        return (MIN_TEMP, MAX_TEMP)
 
     def _get_current_hvac_action(self) -> HVACAction:
         """Derive the current HVAC action.
@@ -215,6 +235,12 @@ class PanasonicHCClimate(ClimateEntity):
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
 
+        if (hvac_mode := kwargs.get(ATTR_HVAC_MODE)) is not None:
+            # set_temperature may carry a mode too; switch first so the setpoint lands in the
+            # new mode's profile. (Home Assistant has already checked the temperature against
+            # the range of the mode the unit was in.)
+            await self.async_set_hvac_mode(HVACMode(hvac_mode))
+
         temperature: float | None
         if (temperature := kwargs.get(ATTR_TEMPERATURE)) is None:
             return
@@ -244,6 +270,13 @@ class PanasonicHCClimate(ClimateEntity):
             else:
                 await self._thermostat.async_set_power(True)
                 await self._thermostat.async_set_mode(hvac_mode.value)
+                # Take the new mode's setpoint range now rather than at the next status
+                # poll: a scene or script that sets the mode and then a temperature would
+                # otherwise have the temperature checked against the old mode's range.
+                self._attr_min_temp, self._attr_max_temp = self._setpoint_range(
+                    hvac_mode.value
+                )
+                self.async_write_ha_state()
         except PanasonicHCException:
             _LOGGER.error("[%s] Failed setting HVAC mode", self._thermostat.mac_address)
 

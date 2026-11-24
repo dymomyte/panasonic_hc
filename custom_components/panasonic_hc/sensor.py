@@ -1,5 +1,6 @@
 """Sensors for Panasonic H&C."""
 
+import datetime
 import logging
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
@@ -25,7 +26,7 @@ from .const import (
     SIGNAL_THERMOSTAT_DISCONNECTED,
 )
 from .fault_codes import describe as describe_fault
-from .panasonic_hc import PanasonicHC
+from .panasonic_hc import MONTHS, PanasonicHC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -75,7 +76,9 @@ async def async_setup_entry(
     async_add_entities(
         [
             PanasonicHCEnergy(thermostat),
+            PanasonicHCMonthlyEnergy(thermostat),
             PanasonicHCOutdoorTemp(thermostat),
+            PanasonicHCActiveAlarm(thermostat),
             PanasonicHCFault(thermostat),
             PanasonicHCFaultDescription(thermostat),
             # Diagnostic service-monitor readings (read via 0x2C to the outdoor unit). Codes,
@@ -139,27 +142,30 @@ async def async_setup_entry(
     )
 
 
-class PanasonicHCEnergy(SensorEntity):
-    """Sensor entity to represent daily power usage.
+class _ControllerEnergySensor(SensorEntity):
+    """Shared base for the energy totals the controller keeps per period (day, month).
 
-    The value is the controller's own estimate (its app calls it "estimated energy
-    consumption": current times a configured supply voltage), summed over the hours of the
-    controller's day completed so far. Each hour appears about half an hour after it ends.
-
-    Two known defects, both at the daily rollover, seen in five months of history:
-      * the last hour of the controller's day is never counted, and
-      * for the first hour of a new day the value is that hour's figure from two days
-        earlier (the ring slot not yet overwritten), which Home Assistant keeps in its
-        long-term total whenever the real figure that replaces it is smaller (about 10 kWh
-        over five months, roughly 1%).
-    The cause is not yet known: it may be how the controller reports its hour and ring
-    pointer across the rollover, or how they are mapped here. The recorded states show the
-    hour is never 0 in that first hour, so the obvious fix
-    (report yesterday's total while the hour is 0) would never run; a DEBUG capture of the
-    0x69 sub-19 frames across the rollover is needed before changing this.
+    Each reading is (period, total so far or None, the previous period's final total or
+    None). Home Assistant's long-term statistics take a fall to below 90% of the last value
+    as a meter reset, and any other fall as a correction, so:
+      * within a period the value never steps down (a brief drop, for example to 0, would
+        count the period twice);
+      * at a period change the finished period's final total is reported first when it is
+        the period just before (its last part only arrives with the change), and the new
+        period is started from 0, so the reset is seen even when the new period is already
+        close to the old total (after an outage);
+      * nothing is applied while the entity is unavailable: the reading taken while
+        (re)connecting is applied once it is available again, or a change it shows would be
+        recorded as "unavailable" and lost.
+    The period is not carried over a Home Assistant restart or a reload of the integration
+    (an options change reloads it): a restored value can be up to 15 minutes old, and
+    reporting a finished period from it could count that period twice. So when the period
+    changed since the last recorded value, the first reading after a restart is taken as it
+    is: the end of the old period is lost, and if the new period is already at 90% or more of
+    the last recorded value, Home Assistant sees no reset and the new period's energy up to
+    that point is lost too. (A link outage without a restart is handled as above.)
     """
 
-    _attr_name = "Daily Energy"
     _attr_has_entity_name = True
     _attr_device_class = SensorDeviceClass.ENERGY
     _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
@@ -167,11 +173,12 @@ class PanasonicHCEnergy(SensorEntity):
     _attr_should_poll = False
     _attr_available = False
 
-    def __init__(self, thermostat: PanasonicHC) -> None:
+    def __init__(self, thermostat: PanasonicHC, unique_id: str) -> None:
         """Initialize the sensor entity."""
 
         self._thermostat = thermostat
-        self._attr_unique_id = dr.format_mac(thermostat.mac_address)
+        self._period = None  # controller period of the reported value
+        self._attr_unique_id = unique_id
         self._attr_device_info = DeviceInfo(
             name=f"{MODEL}_{thermostat.mac_address[-8:].replace(':','')}",
             manufacturer=MANUFACTURER,
@@ -212,18 +219,110 @@ class PanasonicHCEnergy(SensorEntity):
     @callback
     def _async_on_connected(self) -> None:
         self._attr_available = True
+        # The first ring read after a (re)connect arrives before this signal. Apply it now,
+        # so a period change it shows is recorded with real values and not as "unavailable".
+        self._async_on_updated()
         self.async_write_ha_state()
+
+    def _reading(self) -> tuple | None:
+        """(period, total or None, previous period's total or None), or None if no data."""
+        raise NotImplementedError
+
+    def _follows(self, old, new) -> bool:
+        """Whether period new comes straight after period old."""
+        raise NotImplementedError
 
     @callback
     def _async_on_updated(self) -> None:
         """Handle updated data from the thermostat."""
 
-        curhour = self._thermostat.curhour
-        if curhour is not None:
-            # consumption[0:24] = yesterday by hour, [24:48] = today by hour.
-            total = sum(self._thermostat.consumption[24 : 24 + curhour])
-            self._attr_native_value = round(total, 1)
-            self.async_write_ha_state()
+        if not self._attr_available or (reading := self._reading()) is None:
+            return  # a reading that arrives while unavailable is applied on connect
+        period, total, finished = reading
+        last = self._attr_native_value
+
+        if period is None or self._period is None or last is None:
+            # First reading, or periods can't be told apart (controller clock not set):
+            # take the figure as it is.
+            if total is None:
+                return
+            self._attr_native_value = total
+        elif period != self._period:
+            if self._follows(self._period, period) and finished is not None and finished > last:
+                # The period that just ended, now complete.
+                self._attr_native_value = last = finished
+                self.async_write_ha_state()
+            new = total if total is not None else 0.0
+            if new > 0 and last > 0:
+                # Start the new period from 0 so Home Assistant sees the reset.
+                self._attr_native_value = 0.0
+                self.async_write_ha_state()
+            self._attr_native_value = new
+        elif total is None:
+            return
+        elif total >= last:
+            self._attr_native_value = total
+        else:
+            _LOGGER.debug(
+                "%s for %s fell from %s to %s kWh; keeping %s",
+                self._attr_name, period, last, total, last,
+            )
+        self._period = period
+        self.async_write_ha_state()
+
+
+class PanasonicHCEnergy(_ControllerEnergySensor):
+    """Energy used in the controller's current day.
+
+    The controller's own estimate (its app calls it "estimated energy consumption": current
+    times a configured supply voltage), summed over the hours of the controller's day stored
+    so far. Each hour's figure is stored about half an hour after the hour ends on the
+    controller's clock, and the day changes when the last hour's figure is stored (about
+    00:30 on that clock, which does not follow daylight saving).
+
+    At a day change (DEBUG capture, 25 Nov 2026) the finished day's last hour only arrives
+    together with the new day, and for about an hour the new day's first slot still holds
+    the figure from two days earlier; the controller marks that slot not valid until it is
+    written, and such slots are left out (PanasonicHC._update_energy). Counting them added
+    about 13 kWh from April to October 2026. See _ControllerEnergySensor for the rest.
+    """
+
+    _attr_name = "Daily Energy"
+
+    def __init__(self, thermostat: PanasonicHC) -> None:
+        """Initialize the sensor entity."""
+
+        super().__init__(thermostat, dr.format_mac(thermostat.mac_address))
+
+    def _reading(self) -> tuple | None:
+        return self._thermostat.energy  # (day, today, yesterday)
+
+    def _follows(self, old, new) -> bool:
+        return new - old == datetime.timedelta(days=1)
+
+
+class PanasonicHCMonthlyEnergy(_ControllerEnergySensor):
+    """Energy used in the controller's current month (its 13-month ring, 0x69 sub-19 idx 18-25).
+
+    A live total the controller keeps itself. It includes every hour (also the one Daily
+    Energy loses when Home Assistant is down at a day change) and matched the kWh recorded in
+    Home Assistant month by month from April to October 2026. Months follow the controller's
+    clock (no daylight saving). The first month change has not been observed yet; see
+    PanasonicHC._update_month for how a not-yet-cleared slot is handled.
+    """
+
+    _attr_name = "Energy This Month"
+
+    def __init__(self, thermostat: PanasonicHC) -> None:
+        """Initialize the sensor entity."""
+
+        super().__init__(thermostat, f"{dr.format_mac(thermostat.mac_address)}_energy_month")
+
+    def _reading(self) -> tuple | None:
+        return self._thermostat.energy_month  # (slot, this month, last month)
+
+    def _follows(self, old, new) -> bool:
+        return (new - old) % MONTHS == 1
 
 
 class _PanasonicHCSensorBase(SensorEntity):
@@ -285,16 +384,20 @@ class _PanasonicHCSensorBase(SensorEntity):
 
 
 class PanasonicHCOutdoorTemp(_PanasonicHCSensorBase):
-    """Outdoor air temperature (monitor code 0x11, TO), in whole degrees.
+    """Outdoor air temperature (thermistor TO), in 0.1 C.
 
-    Checked against five months of history: it follows the outdoor air at the house, with a
-    shift of about a degree while the compressor runs.
+    Read as the app reads it for its main screen (field 0x21, channel 0x20 of the outdoor
+    unit). Monitor code 0x11 is the same sensor cut to whole degrees (14.7 C read as 14) and
+    is used only while the 0.1 C reading is missing. Checked against five months of history:
+    it follows the outdoor air at the house, with a shift of about a degree while the
+    compressor runs.
     """
 
     _attr_name = "Outdoor Temperature"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_suggested_display_precision = 1
 
     def __init__(self, thermostat: PanasonicHC) -> None:
         """Initialize the outdoor-temperature sensor."""
@@ -308,8 +411,55 @@ class PanasonicHCOutdoorTemp(_PanasonicHCSensorBase):
             self.async_write_ha_state()
 
 
+def _unit_name(address: int | None) -> str | None:
+    """Name a unit address as the protocol numbers them (1-8 indoor, 9-16 outdoor)."""
+
+    if not address:
+        return None
+    if 1 <= address <= 8:
+        return f"indoor unit {address}"
+    if 9 <= address <= 16:
+        return f"outdoor unit {address - 8}"
+    return f"address 0x{address:02x}"
+
+
+class PanasonicHCActiveAlarm(_PanasonicHCSensorBase):
+    """The alarm the wall controller is showing now (0x69 sub-27 idx 5); "none" when clear.
+
+    Unlike Fault Code, which is the newest alarm-HISTORY entry and stays until the history is
+    cleared, this clears when the alarm does. The "unit" attribute is the address the
+    controller reports with it (idx 6); the app reads it but never shows it, so its meaning
+    is inferred."""
+
+    _attr_name = "Active Alarm"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:alert-outline"
+
+    def __init__(self, thermostat: PanasonicHC) -> None:
+        """Initialize the active-alarm sensor."""
+
+        super().__init__(thermostat, "active_alarm")
+
+    @callback
+    def _async_on_updated(self) -> None:
+        if (code := self._thermostat.alarm_code) is None:
+            return
+        active = code != "A00"
+        self._attr_native_value = code if active else "none"
+        attrs = {}
+        if active:
+            attrs["description"] = describe_fault(code)
+            if unit := _unit_name(self._thermostat.alarm_unit):
+                attrs["unit"] = unit
+        self._attr_extra_state_attributes = attrs
+        self.async_write_ha_state()
+
+
 class PanasonicHCFault(_PanasonicHCSensorBase):
-    """Most-recent fault/alert code (field 0x27); 'A00' means no fault."""
+    """Most-recent alarm-HISTORY entry (field 0x27); 'A00' means none.
+
+    It keeps showing an alarm after it has cleared, until the history is cleared; Active
+    Alarm is the live one."""
 
     _attr_name = "Fault Code"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
