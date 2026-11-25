@@ -26,7 +26,12 @@ from .const import (
 )
 from .panasonic_hc import PanasonicHC, PanasonicHCException
 
-PLATFORMS: list[Platform] = [Platform.CLIMATE, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS: list[Platform] = [
+    Platform.BINARY_SENSOR,
+    Platform.CLIMATE,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 # hass.data key: entry_id -> the entry's poll task, so unload can stop it before disconnecting.
 DATA_POLL_TASKS = f"{DOMAIN}_poll_tasks"

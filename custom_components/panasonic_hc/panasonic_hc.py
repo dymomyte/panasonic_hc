@@ -254,7 +254,8 @@ class Status:
         self.prohibited = prohibited
         # Status byte[2] standby flag: False = indoor fan held (idle/standby, "slight blow"),
         # True = not held, None = unknown. It follows the compressor in heating but not in
-        # cooling, so HVACAction uses it only when the compressor current is unknown.
+        # cooling, so HVACAction uses it only when the compressor current is unknown. Shown
+        # as the Indoor Fan Standby binary sensor.
         self.running = running
         # Raw operation-mode nibble from the unit (distinguishes auto-heat 5 / auto-cool 6);
         # used to pick the 0x4C profile for setpoint writes.
