@@ -33,9 +33,9 @@ _LOGGER = logging.getLogger(__name__)
 # Monitor keys that no longer exist; their entities are removed from the registry at setup.
 STALE_MONITOR_KEYS = ("outdoor_coil_temp",)
 
-# Monitor keys renamed when their labels were corrected against the PACi service-manual table:
-# old key -> new key. The registry entry is moved to the new unique id, so the entity keeps
-# its entity_id, history and statistics and only its name changes.
+# Monitor keys renamed to the PACi service-manual names: old key -> new key. At setup the
+# registry entry is moved to the new unique id, so the entity keeps its entity_id, history and
+# statistics and only its name changes.
 RENAMED_MONITOR_KEYS = {
     "room_temp": "return_air_temp",
     "hx_gas_temp": "suction_temp",
@@ -52,9 +52,9 @@ async def async_setup_entry(
 
     thermostat: PanasonicHC = hass.data[DOMAIN][config_entry.entry_id]
 
-    # Monitor code 0x06 used to be exposed as "Outdoor Coil Temperature" (wrong sensor, wrong
-    # scale). It now has a new key, so remove the old registry entry instead of leaving a
-    # permanently unavailable entity behind on upgrade.
+    # Remove the registry entries of retired monitor keys so an upgrade does not leave a
+    # permanently unavailable entity behind. "outdoor_coil_temp" showed code 0x06 under a wrong
+    # name and scale; that code is now "indoor_discharge_air_temp".
     registry = er.async_get(hass)
     for stale_key in STALE_MONITOR_KEYS:
         stale_uid = f"{dr.format_mac(thermostat.mac_address)}_monitor_{stale_key}"
@@ -67,7 +67,7 @@ async def async_setup_entry(
         if not (entity_id := registry.async_get_entity_id("sensor", DOMAIN, old_uid)):
             continue
         if registry.async_get_entity_id("sensor", DOMAIN, new_uid):
-            # Both exist (the new version ran once, then an older one): keep the new entry.
+            # Both exist (this version ran, then an older one re-added the old key): keep the new.
             registry.async_remove(entity_id)
         else:
             _LOGGER.info("Relabelling sensor %s (%s -> %s)", entity_id, old_key, new_key)
@@ -85,8 +85,7 @@ async def async_setup_entry(
             # names and scaling live in panasonic_hc.MONITOR_SENSOR_CODES.
             # Code 0x06 is the optional indoor discharge (supply) air thermistor "BL" on other
             # unit families; the PACi single-split table does not assign it, and such a unit
-            # reports a fixed ~-29 C, so the entity is disabled by default. (It was once
-            # mislabelled "Outdoor Coil Temperature".)
+            # reports a fixed ~-29 C, so the entity is disabled by default.
             PanasonicHCMonitorSensor(
                 thermostat, "indoor_discharge_air_temp", "Indoor Discharge Air Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
@@ -96,17 +95,18 @@ async def async_setup_entry(
                 thermostat, "indoor_coil_temp", "Indoor Coil Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
-            # Code 0x14, "current value (CTL1)" in the PACi table. Zero whenever the compressor
-            # is stopped (also with the indoor fan running), and about 0.23 kW per amp against
-            # the unit's own kWh figure, so it is the outdoor unit's input current rather than
-            # a compressor-only phase current. Was named "Compressor Current"; key unchanged.
+            # Code 0x14, "current value (CTL1)" in the PACi table: zero whenever the compressor
+            # is stopped (also with the indoor fan running), and the controller's energy figure
+            # works out at about 0.23 kW per amp of it, so it is the outdoor unit's input
+            # current rather than a compressor-only phase current. The key keeps the entity's
+            # former name ("Compressor Current") so its unique id does not change.
             PanasonicHCMonitorSensor(
                 thermostat, "compressor_current", "Outdoor Unit Current",
                 SensorDeviceClass.CURRENT, UnitOfElectricCurrent.AMPERE,
             ),
-            # Names follow the PACi single-split service-manual table (see
-            # panasonic_hc.MONITOR_SENSOR_CODES); all whole units.
-            # Code 0x02: the indoor unit's intake thermistor. It reads house air only while the
+            # Names follow the PACi single-split service-manual table; the VRF table names some
+            # codes differently (see panasonic_hc.MONITOR_SENSOR_CODES). All are whole units.
+            # Code 0x02: the indoor unit's intake thermistor. It reads room air only while the
             # indoor fan runs; with the fan off it reads the space the unit sits in (several
             # degrees off the rooms on a ducted install). The room temperature the unit
             # regulates on is the climate entity's current temperature, a different sensor.
@@ -119,16 +119,15 @@ async def async_setup_entry(
                 thermostat, "outdoor_discharge_temp", "Compressor Discharge Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
-            # Code 0x0D: compressor suction line (TS) -- cold in cooling and in heating. It was
-            # labelled "Heat Exchanger Gas Temperature" from the VRF table.
+            # Code 0x0D: compressor suction line (TS) -- cold in cooling and in heating. The VRF
+            # table calls this code "Heat Exchanger Gas Temperature".
             PanasonicHCMonitorSensor(
                 thermostat, "suction_temp", "Compressor Suction Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
             ),
             # Code 0x0E: outdoor heat exchanger (C1): the condenser in cooling (several K above
             # outdoor air under load, within about 1 K of it at low load and when stopped), the
-            # evaporator in heating (below outdoor air). It was labelled "Heat Exchanger Liquid
-            # Temperature".
+            # evaporator in heating (below outdoor air).
             PanasonicHCMonitorSensor(
                 thermostat, "outdoor_hx_temp", "Outdoor Heat Exchanger Temperature",
                 SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS,
@@ -274,17 +273,15 @@ class _ControllerEnergySensor(SensorEntity):
 class PanasonicHCEnergy(_ControllerEnergySensor):
     """Energy used in the controller's current day.
 
-    The controller's own estimate (its app calls it "estimated energy consumption": current
-    times a configured supply voltage), summed over the hours of the controller's day stored
-    so far. Each hour's figure is stored about half an hour after the hour ends on the
-    controller's clock, and the day changes when the last hour's figure is stored (about
-    00:30 on that clock, which does not follow daylight saving).
+    The controller's own estimate (current times a configured supply voltage), summed over
+    the hours of the controller's day stored so far. Each hour's figure is stored about half
+    an hour after the hour ends on the controller's clock, and the day changes when the last
+    hour's figure is stored (about 00:30 on that clock, which does not follow daylight saving).
 
-    At a day change (DEBUG capture, 25 Nov 2026) the finished day's last hour only arrives
-    together with the new day, and for about an hour the new day's first slot still holds
-    the figure from two days earlier; the controller marks that slot not valid until it is
-    written, and such slots are left out (PanasonicHC._update_energy). Counting them added
-    about 13 kWh from April to October 2026. See _ControllerEnergySensor for the rest.
+    At a day change the finished day's last hour only arrives together with the new day, and
+    for about an hour the new day's first slot still holds the figure from two days earlier;
+    the controller marks that slot not valid until it is written, and such slots are left out
+    (PanasonicHC._update_energy). See _ControllerEnergySensor for the rest.
     """
 
     _attr_name = "Daily Energy"
@@ -305,10 +302,9 @@ class PanasonicHCMonthlyEnergy(_ControllerEnergySensor):
     """Energy used in the controller's current month (its 13-month ring, 0x69 sub-19 idx 18-25).
 
     A live total the controller keeps itself. It includes every hour (also the one Daily
-    Energy loses when Home Assistant is down at a day change) and matched the kWh recorded in
-    Home Assistant month by month from April to October 2026. Months follow the controller's
-    clock (no daylight saving). The first month change has not been observed yet; see
-    PanasonicHC._update_month for how a not-yet-cleared slot is handled.
+    Energy loses when Home Assistant is down at a day change). Months follow the controller's
+    clock (no daylight saving). How the controller behaves at a month change is not yet
+    confirmed; see PanasonicHC._update_month for how a not-yet-cleared slot is handled.
     """
 
     _attr_name = "Energy This Month"
@@ -386,10 +382,9 @@ class _PanasonicHCSensorBase(SensorEntity):
 class PanasonicHCOutdoorTemp(_PanasonicHCSensorBase):
     """Outdoor air temperature (thermistor TO), in 0.1 C.
 
-    Read as the app reads it for its main screen (field 0x21, channel 0x20 of the outdoor
-    unit). Monitor code 0x11 is the same sensor cut to whole degrees (14.7 C read as 14) and
-    is used only while the 0.1 C reading is missing. Checked against five months of history:
-    it follows the outdoor air at the house, with a shift of about a degree while the
+    Read from field 0x21, channel 0x20 of the outdoor unit. Monitor code 0x11 is the same
+    sensor cut to whole degrees (14.7 C read as 14) and is used only while the 0.1 C reading
+    is missing. It follows the outdoor air, with a shift of about a degree while the
     compressor runs.
     """
 
@@ -428,8 +423,7 @@ class PanasonicHCActiveAlarm(_PanasonicHCSensorBase):
 
     Unlike Fault Code, which is the newest alarm-HISTORY entry and stays until the history is
     cleared, this clears when the alarm does. The "unit" attribute is the address the
-    controller reports with it (idx 6); the app reads it but never shows it, so its meaning
-    is inferred."""
+    controller reports with it (idx 6); its meaning is inferred, not confirmed."""
 
     _attr_name = "Active Alarm"
     _attr_entity_category = EntityCategory.DIAGNOSTIC

@@ -1,7 +1,8 @@
 """Panasonic ECOi / ECO-G / PACi alarm-code descriptions.
 
-The unit reports faults as a 2-character alarm code (a letter category + a 2-digit number),
-decoded from BLE field 0x27. This maps those codes to a short human description.
+The unit reports a fault as an alarm-code byte that decodes to a letter category + a 2-digit
+number (e.g. "E01"). Codes come from BLE field 0x27 (alarm history) and from the controller's
+current-alarm field (0x69 sub-27). This maps those codes to a short human description.
 
 Source: Panasonic "Fault Code Guide - ECOi / ECO-G / PACi". Meanings can vary slightly by
 model series, so treat these as guidance and confirm against the unit's service manual.
@@ -133,7 +134,9 @@ FAULT_CODES: dict[str, str] = {
 
 
 def describe(code: str | None) -> str | None:
-    """Return a human description for an alarm code, or the raw code if unmapped."""
+    """Return a human description for an alarm code, or None when there is no code.
+
+    Codes not in FAULT_CODES give "Unknown fault (<code>)"."""
 
     if not code:
         return None

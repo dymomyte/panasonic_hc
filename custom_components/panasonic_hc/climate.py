@@ -163,9 +163,12 @@ class PanasonicHCClimate(ClimateEntity):
         self._attr_hvac_action = self._get_current_hvac_action()
 
     def _setpoint_range(self, mode: str | None) -> tuple[float, float]:
-        """The unit's own setpoint range for mode (read from the controller; on this unit
-        cool/dry 18-30, heat 16-30, auto 17-27 C). Fan-only has none, so it gets the widest
-        range; before the limits are read, the fixed MIN_TEMP-MAX_TEMP."""
+        """The unit's own setpoint range for mode, as read from the controller.
+
+        Ranges can differ by mode (e.g. cool 18-30 C, heat 16-30 C). Fan-only has none, so it
+        gets the widest range across modes; before the limits are read, the fixed
+        MIN_TEMP-MAX_TEMP.
+        """
 
         limits = self._thermostat.setpoint_limits
         if mode in limits:
@@ -183,13 +186,13 @@ class PanasonicHCClimate(ClimateEntity):
         The running signal is the measured compressor current (thermostat.compressor_running):
         above zero ⇒ actively heating/cooling, zero ⇒ idle. Status byte[2] (status.running) is
         only the fallback for a unit that does not report the current: it is the "indoor fan
-        held" standby flag, which follows the compressor in heating but did not set in about
-        43 hours of recorded cooling, where it left the action stuck on "cooling" with the
-        compressor stopped. Idle takes
-        precedence over the preheating icon, because the unit keeps HEAT_PREPARING/OP_PREPARING
-        lit while merely parked in heat mode — so a preparing icon only means a genuine warm-up
-        when the compressor is actually running. Defrost (0x69 sub-23) stays on top since it
-        runs the compressor. With neither signal it falls back to a current-vs-target estimate.
+        held" standby flag, which follows the compressor in heating but does not set in
+        cooling, so there it would leave the action stuck on "cooling" with the compressor
+        stopped. Idle takes precedence over the preheating icon, because the unit keeps
+        HEAT_PREPARING/OP_PREPARING lit while merely parked in heat mode — so a preparing icon
+        only means a genuine warm-up when the compressor is actually running. Defrost (0x69
+        sub-23) stays on top since it runs the compressor. With neither signal it falls back to
+        a current-vs-target estimate.
         """
 
         st = self._thermostat.status
@@ -220,7 +223,7 @@ class PanasonicHCClimate(ClimateEntity):
             # in heat mode ("slight blow"), so idle must win over the preheating icon — else it
             # sticks on "Preheating" whenever it is simply idle.
             return HVACAction.IDLE
-        # Compressor is running: a lit preparing icon now means a genuine warm-up phase.
+        # Compressor is running, so a lit preparing icon means a genuine warm-up phase.
         if self._thermostat.preheating:
             return HVACAction.PREHEATING
         if st.mode == HVACMode.COOL:

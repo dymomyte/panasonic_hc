@@ -50,35 +50,30 @@ CURTEMP_JUMP_CONFIRM = 3
 BLE_CHAR_WRITE = "4d200002-eff3-4362-b090-a04cab3f1da0"
 BLE_CHAR_NOTIFY = "4d200003-eff3-4362-b090-a04cab3f1da0"
 
-# Service-monitor "item codes" read via field 0x2C (addressed to the OUTDOOR unit): the wired
-# controller's "Sensor Temperature Display Function" / "Sensor info". The numbering depends on
-# the product family. This is the PACi SINGLE-SPLIT table, printed identically in the PACi
-# service manuals from 2016 on (e.g. S-200/250PE4E + U-200/250PZH4E8, p.6-19):
+# Service-monitor "item codes" (the wired controller's sensor information), read via field 0x2C
+# addressed to the OUTDOOR unit. The numbering depends on the product family; these are the
+# PACi single-split codes:
 #   indoor   02 intake temp | 03 heat exchanger E1 | 04 heat exchanger E2 | 05-08 not used
 #   outdoor  0A discharge temp TD | 0D intake (compressor SUCTION) temp TS | 0E outdoor heat
 #            exchanger C1 | 0F outdoor heat exchanger C2 | 11 outdoor air TO | 13 current value
 #            CTL2 | 14 current value CTL1 | 15 outdoor MV (expansion valve) value | 19 frequency
-# The names used here until now came from the VRF (ECOi) table in the CZ-RTC4 manual, which
-# differs in the outdoor block: there 0D/0E are "heat exchanger gas/liquid 1" and 06 is an
-# indoor discharge-air thermistor. On PACi 0D is the suction line, which five months of
-# history confirm: it is cold in cooling AND heating, sits slightly above the evaporator
-# (median +1 K in cooling, +2.5 K in heating), close to the 0-2 K superheat the manual says the
-# expansion valve regulates to, and falls below -30 C in defrost. No table gives units; the manuals' worked example reads "0085" as 85 C, and the
-# recorded data agree with whole units for every code below.
+# The VRF (ECOi) family uses a different table: there 0D/0E are "heat exchanger gas/liquid 1"
+# and 06 is an indoor discharge-air thermistor. On PACi 0D is the suction line: it reads cold
+# in cooling AND heating, slightly above the evaporator temperature (the expansion valve holds
+# about 0-2 K superheat), and below -30 C in defrost. The table gives no units; every code
+# below reads in whole units (raw 85 = 85 C).
 #
 # Each entry is (code, key, scale): the reply is a signed big-endian 16-bit raw value and the
 # displayed value = raw * scale.
 #
-# Code 0x06 is not assigned on PACi (it is the optional indoor discharge-air thermistor "BL" on
-# other families). It was once exposed as "Outdoor Coil Temperature" at x0.1 because raw -29
-# scaled to a plausible -2.9 C on a cold day; in fact the raw value sits at -29/-28 regardless
-# of mode, season or whether the unit is on, i.e. an input with nothing connected. The entity
-# is kept for other unit families but disabled by default.
+# Code 0x06 is not assigned on PACi (on other families it is the optional indoor discharge-air
+# thermistor "BL"). On PACi its raw value sits at -29/-28 regardless of mode, season or whether
+# the unit is on, i.e. an input with nothing connected. The entity is kept for other unit
+# families but disabled by default.
 #
-# Code 0x14 "current value (CTL1)" reads 0 whenever the compressor is stopped and scales to the
-# unit's own kWh figure at about 0.23 kW per amp, so it is in amps and behaves like the
-# single-phase input current. Whether it or 0x13 (CTL2) is the compressor-side current is not
-# settled by the manuals; it is what tells us the compressor is running.
+# Code 0x14 "current value (CTL1)" is in amps, reads 0 whenever the compressor is stopped and
+# behaves like the single-phase input current (about 0.23 kW per amp). It is what tells us the
+# compressor is running. Whether it or 0x13 (CTL2) is the compressor-side current is unknown.
 MONITOR_COMPRESSOR_CODE = 0x14  # current value CTL1 -> compressor running when > 0
 MONITOR_COMPRESSOR_SCALE = 1.0  # amps
 MONITOR_SENSOR_CODES = [
@@ -93,42 +88,37 @@ MONITOR_SENSOR_CODES = [
     (0x15, "outdoor_eev", 1.0),               # Outdoor expansion valve (MOV1) position, pulses:
                                               # 480 = fully open (parked there when stopped).
 ]
-# No data on this PACi single-split: 0x08 and 0x1D (VRF-only items). Not read yet but in the
-# PACi table: 0x04 (E2), 0x0F (C2), 0x13 (CTL2), 0x19 (frequency) -- the DEBUG sweep below
+# 0x08 and 0x1D are VRF-only items with no data on a PACi single-split. In the PACi table but
+# not read here: 0x04 (E2), 0x0F (C2), 0x13 (CTL2), 0x19 (frequency) -- the DEBUG sweep below
 # logs them.
 MONITOR_SENTINELS = (0x7FFF, -0x8000)  # "no data" markers
 
-# Read-only calibration sweep: when DEBUG logging is enabled, probe this documented code range
-# (0x02..0x22) once per diagnostic cycle and log each raw value. This reveals which codes the
-# unit populates and lets per-code scaling be calibrated against a known state. It is a pure
-# read (field 0x2C / op REQ, exactly like the app's Sensor Info screen) and is skipped entirely
-# unless DEBUG is on, so it adds no traffic in normal operation.
+# Read-only calibration sweep: when DEBUG logging is enabled, read every code in 0x02..0x22
+# once per diagnostics cycle and log each raw value. This shows which codes the unit populates
+# and lets per-code scaling be calibrated against a known state. It is a pure read (field 0x2C,
+# op REQ); values are only logged, never stored, and it is skipped entirely unless DEBUG is on,
+# so it adds no traffic in normal operation.
 MONITOR_SWEEP_RANGE = range(0x02, 0x23)
 
 # Monitor replies carry only the value -- nothing in the parsed reply says which code it
 # answers -- so a reply can only be matched to its request by order. Each read therefore waits
-# for its own reply before the next request goes out. (A fixed 0.8 s wait used to stand in for
-# this; whenever the unit took longer, the late reply was credited to the NEXT code and every
-# later read in that cycle shifted one slot: compressor current showed up as a 0 C outdoor
-# temp, outdoor air as the next sensor, and so on -- seen on roughly 1% of cycles.) If no
-# reply arrives within the timeout the read is abandoned and we stay quiet for the drain time,
-# so a straggler is discarded instead of being matched to the following request.
+# for its own reply before the next request goes out; a fixed delay is not enough, because a
+# late reply would be credited to the NEXT code and shift every later read in the cycle by one
+# slot. If no reply arrives within the timeout the read is abandoned and we stay quiet for the
+# drain time, so a straggler is discarded instead of being matched to the following request.
 MONITOR_REPLY_TIMEOUT = 3.0
 MONITOR_DRAIN_TIME = 2.0
 MONITOR_MAX_MISSES = 2  # consecutive unanswered reads before abandoning the cycle's block
 
 # Read-only capability probe, sent once per connection and ONLY when DEBUG logging is on. It
-# asks for what the official app reads beyond the integration's original set (some are now
-# regular reads, see READS_LONG), so one debug capture shows which of them a unit answers
-# ("probe -> ..." lines, each followed by
-# the raw "BLE frame" reply). Every field is a REQ built exactly as the app builds it, grouped
-# into frames the way the app groups them (the icons are split into smaller frames); replies
-# are logged and never applied to state. A few come from the app's Maintenance screens, which
-# it opens only after switching the controller into a maintenance state -- the probe does not
-# do that: it sends them in normal state, as this integration has long done with the 0x2C
-# Sensor Info reads and alarm entry 1 without trouble. Deliberately absent: anything that
-# writes, the 0x69 sub-3 read (it returns the controller's administrator password), and the
-# maintenance-only reads with no such precedent (0x41 test-run state, 0x39 voltage setting).
+# sends the reads below (some are also regular reads, see READS_ONCE / READS_LONG) so one
+# debug log shows which of them a unit answers ("probe -> ..." lines, each followed by the raw
+# "BLE frame" reply). Every field is a REQ; replies are logged and never applied to state. A
+# few are maintenance-function reads: the probe never switches the controller into a
+# maintenance state, it sends them in normal state, as the regular 0x2C monitor reads and the
+# 0x27 alarm-history read already are. Deliberately absent: anything that writes, the 0x69
+# sub-3 read (it returns the controller's administrator password), and the maintenance-only
+# reads with no such normal-state counterpart (0x41 test-run state, 0x39 voltage setting).
 _MUX = 0x69
 _ICON_CODES_ALL = (1, 6, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 26, 27,
                    28, 29, 30, 31, 32, 33, 34, 35, 36)
@@ -173,11 +163,10 @@ PROBE_READS = [
 ]
 PROBE_SPACING = 2.0  # seconds between probe requests, so each reply follows its own request
 
-# Reads the app makes that this unit answered to the probe (24 Nov 2026): (destination,
-# [(field, request bytes)]). Each field's bytes are what the app sends; the monthly-ring frame
-# groups idx 18 with pages 19-25, where the app sends idx 18 with other headers (either way
-# the header is taken before its pages, see on_notification).
-# Safety: they go out through PanasonicBLEReadReq, which can only build REQs, and every 0x69
+# Regular reads: (destination, [(field, request bytes)]). The monthly-ring frame sends its
+# header (idx 18) together with pages 19-25; the header is taken before its pages (see
+# on_notification).
+# SAFETY: they go out through PanasonicBLEReadReq, which can only build REQs, and every 0x69
 # value is the read form [02 00 sub idx len]. That -- not a different field -- is what keeps
 # them clear of the requests that must never be sent: field 0x69 is shared with the
 # maintenance-mode WRITE [00 00 1b 01 x] (sub 27, like the alarm read below) and with the
@@ -201,12 +190,12 @@ READS_LONG = [  # with the energy + diagnostics block
     ("I_UNIT1", [(0x5C, [0x00, 0x02])]),
 ]
 # Setpoint-limit pairs (upper, lower) in the order the controller sends them (0x69 sub-24
-# idx 2, as the app's main temperature control reads it).
+# idx 2).
 LIMIT_MODES = ("cool", "heat", "dry", "auto")
 MONTHS = 13  # slots in the monthly energy ring
 
-# Status-icon (SettingIcon mDn) codes polled via the 0x69 sub-23 query, mapped to the HVAC
-# action they represent: 9/10 = preheating/preparing, 11 = defrost.
+# Status-icon codes polled via the 0x69 sub-23 query, mapped to the HVAC action they
+# represent: 9/10 = preheating/preparing, 11 = defrost.
 ICON_PREHEATING = (9, 10)
 ICON_DEFROST = 11
 ICON_CODES = (9, 10, 11)
@@ -217,10 +206,10 @@ _LOGGER = logging.getLogger(__name__)
 def _descramble(data: bytes) -> bytes:
     """Reverse the link-layer XOR obfuscation to recover the plaintext frame.
 
-    Mirrors the device scrambling (see PROTOCOL.md in the phc-rev-eng project): XOR every
-    byte with 0x69, undo the cumulative byte chain, then XOR byte[0] with 0xCA. Used only
-    for debug logging of raw frames; unlike PanasonicBLEParcel.parse it does no checksum or
-    length validation, so it works on any frame including ones the parser would reject.
+    XOR every byte with 0x69, undo the cumulative byte chain, then XOR byte[0] with 0xCA.
+    Used only for debug logging of raw frames; unlike PanasonicBLEParcel.parse it does no
+    checksum or length validation, so it works on any frame including ones the parser would
+    reject.
     """
 
     v = bytearray(data)
@@ -263,8 +252,9 @@ class Status:
         # Whether any operation is currently locked/restricted on the unit (RC lock /
         # central control). Not used for HVACAction; available for a future "locked" sensor.
         self.prohibited = prohibited
-        # Compressor/thermo running (status byte[2]): True = actively heating/cooling,
-        # False = idle/standby ("slight blow"), None = unknown. Drives HVACAction.
+        # Status byte[2] standby flag: False = indoor fan held (idle/standby, "slight blow"),
+        # True = not held, None = unknown. It follows the compressor in heating but not in
+        # cooling, so HVACAction uses it only when the compressor current is unknown.
         self.running = running
         # Raw operation-mode nibble from the unit (distinguishes auto-heat 5 / auto-cool 6);
         # used to pick the 0x4C profile for setpoint writes.
@@ -305,7 +295,8 @@ class PanasonicHC:
         # Controller's hourly energy ring (0x69 sub-19), kept as read: slot -> kWh.
         self.curhour: int | None = None  # hours of the ring day stored (newest = curhour - 1)
         self.curindex: int | None = None  # slot of hour curhour - 1
-        self.energy_date: datetime.date | None = None  # ring day (changes at ~00:30)
+        # Ring day, by the controller's clock (it changes at about 00:30 on that clock).
+        self.energy_date: datetime.date | None = None
         self._energy_valid = 0  # bit n set = slot n holds data
         self._energy_ring: list[float | None] = [None] * 48
         self._energy_headers: set[int] = set()  # headers (idx 1, 2) since the last total
@@ -434,9 +425,9 @@ class PanasonicHC:
         await self._async_write_command(PanasonicBLEStatusReq())
 
         # Poll the preheating/defrost status icons (0x69 sub-23) every cycle -> HVAC action
-        # precedence. The unit answers these (active byte = 0 when the state is inactive), and
-        # preheating in particular is short-lived, so they need to be polled at the status rate
-        # to be caught rather than parked in the slow diagnostic block.
+        # precedence. A reply's active byte is 0 while the state is inactive. Preheating in
+        # particular is short-lived, so they need to be polled at the status rate to be caught
+        # rather than parked in the slow diagnostic block.
         for code in ICON_CODES:
             await asyncio.sleep(0.4)
             await self._async_write_command(PanasonicBLEIconReq(code))
@@ -558,7 +549,7 @@ class PanasonicHC:
     async def _sweep_monitor_codes(self) -> None:
         """Read-only calibration sweep over MONITOR_SWEEP_RANGE (DEBUG only).
 
-        Logs the raw signed value of every code so a debug capture reveals which codes the unit
+        Logs the raw signed value of every code so the debug log shows which codes the unit
         populates and lets per-code scaling be calibrated. Values are logged, not stored as
         entities. Uses the same harmless 0x2C read as the named sensors."""
 
@@ -613,8 +604,8 @@ class PanasonicHC:
     def on_notification(self, handle: BleakGATTCharacteristic, data: bytes) -> None:
         """Handle data from BLE GATT Notifications."""
 
-        # Log the de-scrambled plaintext of every inbound frame (debug only). Handy for
-        # protocol work: shows fields the parser ignores and the raw bytes of each frame.
+        # Log the de-scrambled plaintext of every inbound frame (debug only): shows fields the
+        # parser ignores and the raw bytes of each frame.
         if _LOGGER.isEnabledFor(logging.DEBUG):
             _LOGGER.debug("BLE frame: %s", _descramble(data).hex(" "))
 
@@ -765,7 +756,7 @@ class PanasonicHC:
             and len(packet.pdata) >= 5
             and packet.pdata[2] == 23
         ):
-            # Status-icon reply (0x69 sub-23): pdata[3]=icon mDn, pdata[4]=active.
+            # Status-icon reply (0x69 sub-23): pdata[3]=icon code, pdata[4]=active.
             self._icons[packet.pdata[3]] = packet.pdata[4] != 0
             self.preheating = any(self._icons.get(c) for c in ICON_PREHEATING)
             self.defrosting = bool(self._icons.get(ICON_DEFROST))
@@ -864,10 +855,11 @@ class PanasonicHC:
     def _update_month(self, index: int, valid: int, values: list[float]) -> None:
         """Take this month's and last month's totals from a complete read of the monthly ring.
 
-        Slot index is the current month and is a live total. A month change has not been
-        seen yet. The hourly ring marks such a slot not valid until it is written, and a clear
-        valid bit is not trusted here either. In case the controller moves to the next slot
-        with the bit still set and the figure from 13 months earlier still in it:
+        Slot index is the current month and is a live total. How the controller handles a
+        month change is not known. The hourly ring marks a new slot not valid until it is
+        written, and a slot with a clear valid bit is not trusted here either. In case the
+        controller moves to the next slot with the bit still set and the figure from 13 months
+        earlier still in it:
           * right after the slot moves, a figure equal to what the slot held before is not
             trusted until it changes;
           * on the 1st of the month (controller day, from the hourly ring read just before),
@@ -882,7 +874,7 @@ class PanasonicHC:
             self.energy is not None
             and self.energy[0] is not None
             and self.energy[0].day == 1
-            # A margin for an hourly read a cycle behind; real month totals here are 34-366 kWh.
+            # A margin for an hourly read that is a cycle behind.
             and values[index] > self.energy[1] + 5.0
         ):
             self._month_stale = (index, values[index])
@@ -941,8 +933,8 @@ class PanasonicHC:
         """Turn nanoeX on or off (applies to all indoor units)."""
 
         await self._async_write_command(PanasonicBLENanoe(state))
-        # Reflect it straight away, then read it back as the app does about a second after a
-        # change (it is also read with every diagnostics cycle, see READS_LONG).
+        # Reflect it straight away, then read it back about a second after the change (it is
+        # also read with every diagnostics cycle, see READS_LONG).
         self.nanoe = state
         for callback in self._on_update_callbacks:
             callback()
